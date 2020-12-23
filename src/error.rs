@@ -36,6 +36,8 @@ pub enum Error {
     ExpectedMapEnd,
     ExpectedEnum,
     TrailingCharacters,
+
+    ExpectedArrayLength,
 }
 
 impl ser::Error for Error {

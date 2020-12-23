@@ -141,7 +141,8 @@ impl<'a> ser::Serializer for &'a mut Serializer {
 
     // An absent optional is represented as the JSON `null`.
     fn serialize_none(self) -> Result<()> {
-        self.serialize_unit()
+        // TODO: Might have to track an index here so we can write the proper index later
+        Ok(())
     }
 
     // A present optional is represented as just the contained value. Note that
@@ -159,7 +160,7 @@ impl<'a> ser::Serializer for &'a mut Serializer {
     // In Serde, unit means an anonymous value containing no data. Map this to
     // JSON as `null`.
     fn serialize_unit(self) -> Result<()> {
-        self.output += "null";
+        // TODO: Might have to track an index here so we can write the proper index later
         Ok(())
     }
 
@@ -177,10 +178,10 @@ impl<'a> ser::Serializer for &'a mut Serializer {
     fn serialize_unit_variant(
         self,
         _name: &'static str,
-        _variant_index: u32,
-        variant: &'static str,
+        variant_index: u32,
+        _variant: &'static str,
     ) -> Result<()> {
-        self.serialize_str(variant)
+        self.serialize_u32(variant_index)
     }
 
     // As is done here, serializers are encouraged to treat newtype structs as
@@ -201,44 +202,28 @@ impl<'a> ser::Serializer for &'a mut Serializer {
         self,
         _name: &'static str,
         _variant_index: u32,
-        variant: &'static str,
+        _variant: &'static str,
         value: &T,
     ) -> Result<()>
     where
         T: ?Sized + Serialize,
     {
-        self.output += "{";
-        variant.serialize(&mut *self)?;
-        self.output += ":";
-        value.serialize(&mut *self)?;
-        self.output += "}";
-        Ok(())
+        // TODO: I think all we need is to have the variant match a bebop struct, so just serialize that
+        value.serialize(self)
     }
 
-    // Now we get to the serialization of compound types.
-    //
-    // The start of the sequence, each value, and the end are three separate
-    // method calls. This one is responsible only for serializing the start,
-    // which in JSON is `[`.
-    //
-    // The length of the sequence may or may not be known ahead of time. This
-    // doesn't make a difference in JSON because the length is not represented
-    // explicitly in the serialized form. Some serializers may only be able to
-    // support sequences for which the length is known up front.
-    fn serialize_seq(self, _len: Option<usize>) -> Result<Self::SerializeSeq> {
-        self.output += "[";
+    fn serialize_seq(self, len: Option<usize>) -> Result<Self::SerializeSeq> {
+        self.output
+            .extend(&(len.ok_or(Error::ExpectedArrayLength)? as u32).to_le_bytes());
         Ok(self)
     }
 
-    // Tuples look just like sequences in JSON. Some formats may be able to
-    // represent tuples more efficiently by omitting the length, since tuple
-    // means that the corresponding `Deserialize implementation will know the
-    // length without needing to look at the serialized data.
+    // We'll just treat a tuple as an array
     fn serialize_tuple(self, len: usize) -> Result<Self::SerializeTuple> {
         self.serialize_seq(Some(len))
     }
 
-    // Tuple structs look just like sequences in JSON.
+    // Tuple structs look just like sequences in Bebop
     fn serialize_tuple_struct(
         self,
         _name: &'static str,
@@ -247,8 +232,6 @@ impl<'a> ser::Serializer for &'a mut Serializer {
         self.serialize_seq(Some(len))
     }
 
-    // Tuple variants are represented in JSON as `{ NAME: [DATA...] }`. Again
-    // this method is only responsible for the externally tagged representation.
     fn serialize_tuple_variant(
         self,
         _name: &'static str,
@@ -256,15 +239,15 @@ impl<'a> ser::Serializer for &'a mut Serializer {
         variant: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeTupleVariant> {
-        self.output += "{";
+        // TODO: I think all we need is to have the variant match a bebop struct, so just serialize that
         variant.serialize(&mut *self)?;
-        self.output += ":[";
         Ok(self)
     }
 
     // Maps are represented in JSON as `{ K: V, K: V, ... }`.
-    fn serialize_map(self, _len: Option<usize>) -> Result<Self::SerializeMap> {
-        self.output += "{";
+    fn serialize_map(self, len: Option<usize>) -> Result<Self::SerializeMap> {
+        self.output
+            .extend(&(len.ok_or(Error::ExpectedArrayLength)? as u32).to_le_bytes());
         Ok(self)
     }
 
