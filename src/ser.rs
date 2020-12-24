@@ -43,7 +43,7 @@ impl<'a> ser::Serializer for &'a mut Serializer {
     type SerializeTupleVariant = Self;
     type SerializeMap = Self;
     type SerializeStruct = StructSerializer<'a>;
-    type SerializeStructVariant = Self;
+    type SerializeStructVariant = StructSerializer<'a>;
 
     // Here we go with the simple methods. The following 12 methods receive one
     // of the primitive types of the data model and map it to JSON by appending
@@ -244,8 +244,8 @@ impl<'a> ser::Serializer for &'a mut Serializer {
         Ok(self)
     }
 
-    // Maps are represented in JSON as `{ K: V, K: V, ... }`.
     fn serialize_map(self, len: Option<usize>) -> Result<Self::SerializeMap> {
+        // Add the length of the map
         self.output
             .extend(&(len.ok_or(Error::ExpectedArrayLength)? as u32).to_le_bytes());
         Ok(self)
@@ -268,10 +268,15 @@ impl<'a> ser::Serializer for &'a mut Serializer {
         _name: &'static str,
         _variant_index: u32,
         variant: &'static str,
-        _len: usize,
+        len: usize,
     ) -> Result<Self::SerializeStructVariant> {
-        variant.serialize(&mut *self)?;
-        Ok(self)
+        // TODO: We might not want to support this (I'll have to wait and see until I implement deserialize)
+        Ok(StructSerializer {
+            parts: Vec::new(),
+            expected_length: len,
+            has_none: false,
+            inner: self,
+        })
     }
 }
 
@@ -285,14 +290,65 @@ pub struct StructSerializer<'a> {
 }
 
 impl<'a> StructSerializer<'a> {
+    // Messages (i.e. things that can be optional) are serialized differently
     fn serialize_message(self) -> Result<()> {
-        // TODO: implement message serialization
+        // Create the body of the message (so we can get length), we are using
+        // zip so we have the right index type (and starting index) for
+        // serialization
+        let mut body = (1u8..)
+            .zip(self.parts)
+            .fold(Vec::new(), |mut acc, (index, data)| {
+                // If there is data push the index and then extend with the body
+                if let Some(bytes) = data {
+                    acc.push(index);
+                    acc.extend(bytes);
+                }
+                acc
+            });
+        // Push the final empty terminator byte
+        body.push(0u8);
+
+        // Now we can get a length and add that to the actual serializer
+        self.inner.output.extend(&(body.len() as u32).to_le_bytes());
+        self.inner.output.extend(body);
         Ok(())
     }
 
+    // Structs are a simple concat of all the data members
     fn serialize_struct(self) -> Result<()> {
-        // TODO: implement struct serialization
+        // This is only called internally, so we aren't handling the case where
+        // a None exists in the Vec
+        self.inner
+            .output
+            .extend(self.parts.into_iter().flatten().flatten());
         Ok(())
+    }
+
+    // These are the same functions needed for the trait implementation so they
+    // can be reused
+    fn serialize_field_inner<T>(&mut self, key: &'static str, value: &T) -> Result<()>
+    where
+        T: ?Sized + Serialize,
+    {
+        let mut serializer = Serializer { output: Vec::new() };
+        value.serialize(&mut serializer)?;
+        // Not sure if there is a better way to check, but basically, if it is
+        // none, it will still be empty
+        if serializer.output.is_empty() {
+            self.has_none = true;
+            self.parts.push(None)
+        } else {
+            self.parts.push(Some(serializer.output))
+        }
+        Ok(())
+    }
+
+    fn end_inner(self) -> Result<()> {
+        if self.has_none {
+            self.serialize_message()
+        } else {
+            self.serialize_struct()
+        }
     }
 }
 
@@ -304,24 +360,11 @@ impl<'a> ser::SerializeStruct for StructSerializer<'a> {
     where
         T: ?Sized + Serialize,
     {
-        let serializer = Serializer { output: Vec::new() };
-        value.serialize(serializer)?;
-        // Not sure if there is a better way to check, but basically, if it is none, it will still be empty
-        if serializer.output.is_empty() {
-            self.has_none = true;
-            self.parts.push(None)
-        } else {
-            self.parts.push(Some(serializer.output))
-        }
-        Ok(())
+        self.serialize_field_inner(key, value)
     }
 
     fn end(self) -> Result<()> {
-        if has_none {
-            self.serialize_message()
-        } else {
-            self.serialize_struct()
-        }
+        self.end_inner()
     }
 }
 
@@ -361,14 +404,10 @@ impl<'a> ser::SerializeTuple for &'a mut Serializer {
     where
         T: ?Sized + Serialize,
     {
-        if !self.output.ends_with('[') {
-            self.output += ",";
-        }
         value.serialize(&mut **self)
     }
 
     fn end(self) -> Result<()> {
-        self.output += "]";
         Ok(())
     }
 }
@@ -382,27 +421,14 @@ impl<'a> ser::SerializeTupleStruct for &'a mut Serializer {
     where
         T: ?Sized + Serialize,
     {
-        if !self.output.ends_with('[') {
-            self.output += ",";
-        }
         value.serialize(&mut **self)
     }
 
     fn end(self) -> Result<()> {
-        self.output += "]";
         Ok(())
     }
 }
 
-// Tuple variants are a little different. Refer back to the
-// `serialize_tuple_variant` method above:
-//
-//    self.output += "{";
-//    variant.serialize(&mut *self)?;
-//    self.output += ":[";
-//
-// So the `end` method in this impl is responsible for closing both the `]` and
-// the `}`.
 impl<'a> ser::SerializeTupleVariant for &'a mut Serializer {
     type Ok = ();
     type Error = Error;
@@ -411,92 +437,40 @@ impl<'a> ser::SerializeTupleVariant for &'a mut Serializer {
     where
         T: ?Sized + Serialize,
     {
-        if !self.output.ends_with('[') {
-            self.output += ",";
-        }
         value.serialize(&mut **self)
     }
 
     fn end(self) -> Result<()> {
-        self.output += "]}";
         Ok(())
     }
 }
 
-// Some `Serialize` types are not able to hold a key and value in memory at the
-// same time so `SerializeMap` implementations are required to support
-// `serialize_key` and `serialize_value` individually.
-//
-// There is a third optional method on the `SerializeMap` trait. The
-// `serialize_entry` method allows serializers to optimize for the case where
-// key and value are both available simultaneously. In JSON it doesn't make a
-// difference so the default behavior for `serialize_entry` is fine.
 impl<'a> ser::SerializeMap for &'a mut Serializer {
     type Ok = ();
     type Error = Error;
 
-    // The Serde data model allows map keys to be any serializable type. JSON
-    // only allows string keys so the implementation below will produce invalid
-    // JSON if the key serializes as something other than a string.
-    //
-    // A real JSON serializer would need to validate that map keys are strings.
-    // This can be done by using a different Serializer to serialize the key
-    // (instead of `&mut **self`) and having that other serializer only
-    // implement `serialize_str` and return an error on any other data type.
     fn serialize_key<T>(&mut self, key: &T) -> Result<()>
     where
         T: ?Sized + Serialize,
     {
-        if !self.output.ends_with('{') {
-            self.output += ",";
-        }
         key.serialize(&mut **self)
     }
 
-    // It doesn't make a difference whether the colon is printed at the end of
-    // `serialize_key` or at the beginning of `serialize_value`. In this case
-    // the code is a bit simpler having it here.
     fn serialize_value<T>(&mut self, value: &T) -> Result<()>
     where
         T: ?Sized + Serialize,
     {
-        self.output += ":";
         value.serialize(&mut **self)
     }
 
     fn end(self) -> Result<()> {
-        self.output += "}";
-        Ok(())
-    }
-}
-
-// Structs are like maps in which the keys are constrained to be compile-time
-// constant strings.
-impl<'a> ser::SerializeStruct for &'a mut Serializer {
-    type Ok = ();
-    type Error = Error;
-
-    fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<()>
-    where
-        T: ?Sized + Serialize,
-    {
-        if !self.output.ends_with('{') {
-            self.output += ",";
-        }
-        key.serialize(&mut **self)?;
-        self.output += ":";
-        value.serialize(&mut **self)
-    }
-
-    fn end(self) -> Result<()> {
-        self.output += "}";
         Ok(())
     }
 }
 
 // Similar to `SerializeTupleVariant`, here the `end` method is responsible for
 // closing both of the curly braces opened by `serialize_struct_variant`.
-impl<'a> ser::SerializeStructVariant for &'a mut Serializer {
+impl<'a> ser::SerializeStructVariant for StructSerializer<'a> {
     type Ok = ();
     type Error = Error;
 
@@ -504,16 +478,10 @@ impl<'a> ser::SerializeStructVariant for &'a mut Serializer {
     where
         T: ?Sized + Serialize,
     {
-        if !self.output.ends_with('{') {
-            self.output += ",";
-        }
-        key.serialize(&mut **self)?;
-        self.output += ":";
-        value.serialize(&mut **self)
+        self.serialize_field_inner(key, value)
     }
 
     fn end(self) -> Result<()> {
-        self.output += "}}";
-        Ok(())
+        self.end_inner()
     }
 }
