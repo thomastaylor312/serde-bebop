@@ -3,15 +3,10 @@ use serde::{ser, Serialize};
 use crate::error::{Error, Result};
 
 pub struct Serializer {
-    // This string starts empty and JSON is appended as values are serialized.
+    // This buffer starts empty and we append bytes to it
     output: Vec<u8>,
 }
 
-// By convention, the public API of a Serde serializer is one or more `to_abc`
-// functions such as `to_string`, `to_bytes`, or `to_writer` depending on what
-// Rust types the serializer is able to produce as output.
-//
-// This basic serializer supports only `to_string`.
 pub fn to_bytes<T>(value: &T) -> Result<Vec<u8>>
 where
     T: Serialize,
@@ -20,6 +15,8 @@ where
     value.serialize(&mut serializer)?;
     Ok(serializer.output)
 }
+
+// TODO: Probably add a `to_writer` and `to_async_writer`
 
 impl<'a> ser::Serializer for &'a mut Serializer {
     // The output type produced by this `Serializer` during successful
@@ -179,9 +176,10 @@ impl<'a> ser::Serializer for &'a mut Serializer {
         self,
         _name: &'static str,
         variant_index: u32,
-        _variant: &'static str,
+        variant: &'static str,
     ) -> Result<()> {
-        self.serialize_u32(variant_index)
+        // TODO: Serialize enum correctly
+        Ok(())
     }
 
     // As is done here, serializers are encouraged to treat newtype structs as
@@ -193,11 +191,6 @@ impl<'a> ser::Serializer for &'a mut Serializer {
         value.serialize(self)
     }
 
-    // Note that newtype variant (and all of the other variant serialization
-    // methods) refer exclusively to the "externally tagged" enum
-    // representation.
-    //
-    // Serialize this to JSON in externally tagged form as `{ NAME: VALUE }`.
     fn serialize_newtype_variant<T>(
         self,
         _name: &'static str,
@@ -208,7 +201,7 @@ impl<'a> ser::Serializer for &'a mut Serializer {
     where
         T: ?Sized + Serialize,
     {
-        // TODO: I think all we need is to have the variant match a bebop struct, so just serialize that
+        // TODO: This cannot be supported as enums in bebop cannot contain additional data
         value.serialize(self)
     }
 
