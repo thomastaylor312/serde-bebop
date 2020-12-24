@@ -42,7 +42,7 @@ impl<'a> ser::Serializer for &'a mut Serializer {
     type SerializeTupleStruct = Self;
     type SerializeTupleVariant = Self;
     type SerializeMap = Self;
-    type SerializeStruct = Self;
+    type SerializeStruct = StructSerializer<'a>;
     type SerializeStructVariant = Self;
 
     // Here we go with the simple methods. The following 12 methods receive one
@@ -251,13 +251,14 @@ impl<'a> ser::Serializer for &'a mut Serializer {
         Ok(self)
     }
 
-    // Structs look just like maps in JSON. In particular, JSON requires that we
-    // serialize the field names of the struct. Other formats may be able to
-    // omit the field names when serializing structs because the corresponding
-    // Deserialize implementation is required to know what the keys are without
-    // looking at the serialized data.
     fn serialize_struct(self, _name: &'static str, len: usize) -> Result<Self::SerializeStruct> {
-        self.serialize_map(Some(len))
+        // Set up our custom serializer
+        Ok(StructSerializer {
+            parts: Vec::new(),
+            expected_length: len,
+            has_none: false,
+            inner: self,
+        })
     }
 
     // Struct variants are represented in JSON as `{ NAME: { K: V, ... } }`.
@@ -269,10 +270,58 @@ impl<'a> ser::Serializer for &'a mut Serializer {
         variant: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeStructVariant> {
-        self.output += "{";
         variant.serialize(&mut *self)?;
-        self.output += ":{";
         Ok(self)
+    }
+}
+
+pub struct StructSerializer<'a> {
+    // Because bebop structs require all fields to be set, we need to track for
+    // `Option` values so we can represent as a message or a struct
+    parts: Vec<Option<Vec<u8>>>,
+    expected_length: usize,
+    has_none: bool,
+    inner: &'a mut Serializer,
+}
+
+impl<'a> StructSerializer<'a> {
+    fn serialize_message(self) -> Result<()> {
+        // TODO: implement message serialization
+        Ok(())
+    }
+
+    fn serialize_struct(self) -> Result<()> {
+        // TODO: implement struct serialization
+        Ok(())
+    }
+}
+
+impl<'a> ser::SerializeStruct for StructSerializer<'a> {
+    type Ok = ();
+    type Error = Error;
+
+    fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<()>
+    where
+        T: ?Sized + Serialize,
+    {
+        let serializer = Serializer { output: Vec::new() };
+        value.serialize(serializer)?;
+        // Not sure if there is a better way to check, but basically, if it is none, it will still be empty
+        if serializer.output.is_empty() {
+            self.has_none = true;
+            self.parts.push(None)
+        } else {
+            self.parts.push(Some(serializer.output))
+        }
+        Ok(())
+    }
+
+    fn end(self) -> Result<()> {
+        if has_none {
+            self.serialize_message()
+        } else {
+            self.serialize_struct()
+        }
     }
 }
 
@@ -294,15 +343,11 @@ impl<'a> ser::SerializeSeq for &'a mut Serializer {
     where
         T: ?Sized + Serialize,
     {
-        if !self.output.ends_with('[') {
-            self.output += ",";
-        }
         value.serialize(&mut **self)
     }
 
     // Close the sequence.
     fn end(self) -> Result<()> {
-        self.output += "]";
         Ok(())
     }
 }
