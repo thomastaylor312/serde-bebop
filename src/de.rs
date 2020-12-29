@@ -418,7 +418,7 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
         V: Visitor<'de>,
     {
         let len = self.parse_object_size()?;
-        visitor.visit_seq(List::new(&mut self, len))
+        visitor.visit_map(List::new(&mut self, len))
     }
 
     fn deserialize_struct<V>(
@@ -442,11 +442,18 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
         let bytes = &self.input[..size];
         let len =
             u32::from_le_bytes(bytes.try_into().map_err(|_| Error::InvalidNumberBytes)?) as usize;
+        // TODO: Figure out how to pull out a nested message: Probably assume it is the length and check that the last byte at the end of that range is a 0 byte
         let next_index = if self.input[size..].len() == len {
+            println!("got message with name {}", _name);
+            // Consume the bytes we used for the message length and trim off the trailing 0 byte
+            self.input = &self.input[size..];
+            let (_, rest) = self.input.split_last().ok_or(Error::Eof)?;
+            self.input = rest;
             self.is_message = true;
             // If it is a message, make sure to set the message index (starting with 1)
             Some(BEBOP_STARTING_INDEX)
         } else {
+            println!("got struct with name {}", _name);
             None
         };
         visitor.visit_seq(StructAccess::new(&mut self, next_index))
@@ -519,6 +526,32 @@ impl<'de, 'a> SeqAccess<'de> for List<'a, 'de> {
     }
 }
 
+impl<'de, 'a> MapAccess<'de> for List<'a, 'de> {
+    type Error = Error;
+
+    fn next_key_seed<K>(&mut self, seed: K) -> Result<Option<K::Value>>
+    where
+        K: DeserializeSeed<'de>,
+    {
+        // If we have serialized all entries, we are done
+        if self.current_len == self.expected_len {
+            Ok(None)
+        } else {
+            // Otherwise, increment the current and deserialize the next message
+            self.current_len += 1;
+            seed.deserialize(&mut *self.de).map(Some)
+        }
+    }
+
+    fn next_value_seed<V>(&mut self, seed: V) -> Result<V::Value>
+    where
+        V: DeserializeSeed<'de>,
+    {
+        // We handle the index incrementing in the key seed, so just serialize
+        seed.deserialize(&mut *self.de)
+    }
+}
+
 struct StructAccess<'a, 'de: 'a> {
     de: &'a mut Deserializer<'de>,
     next_index: Option<usize>,
@@ -543,6 +576,8 @@ impl<'de, 'a> SeqAccess<'de> for StructAccess<'a, 'de> {
         } else {
             // Otherwise, increment the current index (if a message) and trim the index off the input if it is a message
             if let Some(i) = self.next_index.take() {
+                println!("Expected index: {}", i);
+                println!("Current input: {:?}", self.de.input);
                 let possible_index = *self.de.input.first().ok_or(Error::Eof)? as usize;
                 // Either way, the index increments, so we know that this one
                 // wasn't present in the message (or was handled)
@@ -559,32 +594,6 @@ impl<'de, 'a> SeqAccess<'de> for StructAccess<'a, 'de> {
             }
             seed.deserialize(&mut *self.de).map(Some)
         }
-    }
-}
-
-impl<'de, 'a> MapAccess<'de> for List<'a, 'de> {
-    type Error = Error;
-
-    fn next_key_seed<K>(&mut self, seed: K) -> Result<Option<K::Value>>
-    where
-        K: DeserializeSeed<'de>,
-    {
-        // If we have serialized all entries, we are done
-        if self.current_len == self.expected_len {
-            Ok(None)
-        } else {
-            // Otherwise, increment the current and deserialize the next message
-            self.current_len += 1;
-            seed.deserialize(&mut *self.de).map(Some)
-        }
-    }
-
-    fn next_value_seed<V>(&mut self, seed: V) -> Result<V::Value>
-    where
-        V: DeserializeSeed<'de>,
-    {
-        // We handle the index incrementing in the key seed, so just serialize
-        seed.deserialize(&mut *self.de)
     }
 }
 
@@ -634,5 +643,144 @@ impl<'a, 'de> VariantAccess<'de> for &'a mut Deserializer<'de> {
         V: Visitor<'de>,
     {
         Err(Error::VariantDataNotAllowed)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::collections::HashMap;
+
+    use super::*;
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct SimpleStruct {
+        name: String,
+        age: u16,
+    }
+
+    #[test]
+    fn test_valid_struct() {
+        // Taken from one of the bebop reference implementations
+        let data: Vec<u8> = vec![7, 0, 0, 0, 67, 104, 97, 114, 108, 105, 101, 28, 0];
+        let deserialized: SimpleStruct = from_bytes(&data).expect("Unable to deserialize");
+        let expected = SimpleStruct {
+            name: "Charlie".to_string(),
+            age: 28,
+        };
+        assert_eq!(deserialized, expected);
+    }
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct SimpleMessage {
+        name: String,
+        age: Option<u16>,
+    }
+
+    #[test]
+    fn test_valid_message_all_fields() {
+        // Taken from one of the bebop reference implementations
+        let data: Vec<u8> = vec![
+            16, 0, 0, 0, 1, 7, 0, 0, 0, 67, 104, 97, 114, 108, 105, 101, 2, 28, 0, 0,
+        ];
+
+        let deserialized: SimpleMessage = from_bytes(&data).expect("Unable to deserialize");
+        let expected = SimpleMessage {
+            name: "Charlie".to_string(),
+            age: Some(28),
+        };
+
+        assert_eq!(deserialized, expected);
+    }
+
+    #[test]
+    fn test_valid_message_some_fields() {
+        // Taken from one of the bebop reference implementations
+        let data: Vec<u8> = vec![
+            13, 0, 0, 0, 1, 7, 0, 0, 0, 67, 104, 97, 114, 108, 105, 101, 0,
+        ];
+
+        let deserialized: SimpleMessage = from_bytes(&data).expect("Unable to deserialize");
+        let expected = SimpleMessage {
+            name: "Charlie".to_string(),
+            age: None,
+        };
+
+        assert_eq!(deserialized, expected);
+    }
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    #[allow(dead_code)]
+    enum Fun {
+        Not,
+        Somewhat,
+        Really,
+    }
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct Complex {
+        name: Option<String>,
+        fun_level: Fun,
+        map: HashMap<String, SimpleStruct>,
+        message_map: HashMap<String, SimpleMessage>,
+        list: Vec<f32>,
+        boolean: bool,
+        int16: i16,
+        int32: i32,
+        int64: i64,
+        uint16: u16,
+        uint32: u32,
+        uint64: u64,
+        byte: u8,
+        float64: f64,
+    }
+
+    #[test]
+    fn test_complex() {
+        // Taken from one of the bebop reference implementations
+        let data: Vec<u8> = vec![
+            124, 0, 0, 0, 1, 7, 0, 0, 0, 67, 104, 97, 114, 108, 105, 101, 2, 1, 0, 0, 0, 3, 1, 0,
+            0, 0, 3, 0, 0, 0, 111, 110, 101, 3, 0, 0, 0, 79, 110, 101, 16, 0, 4, 1, 0, 0, 0, 3, 0,
+            0, 0, 111, 110, 101, 9, 0, 0, 0, 1, 3, 0, 0, 0, 79, 110, 101, 0, 5, 2, 0, 0, 0, 218,
+            15, 73, 64, 77, 248, 45, 64, 6, 1, 7, 253, 255, 8, 42, 0, 0, 0, 9, 21, 205, 91, 7, 0,
+            0, 0, 0, 10, 3, 0, 11, 42, 0, 0, 0, 12, 21, 205, 91, 7, 0, 0, 0, 0, 13, 17, 14, 74,
+            216, 18, 77, 251, 33, 9, 64, 0,
+        ];
+
+        let deserialized: Complex = from_bytes(&data).expect("Unable to deserialize");
+
+        let mut map = HashMap::new();
+        map.insert(
+            "one".to_string(),
+            SimpleStruct {
+                name: "One".to_string(),
+                age: 16,
+            },
+        );
+        let mut message_map = HashMap::new();
+        message_map.insert(
+            "one".to_string(),
+            SimpleMessage {
+                name: "One".to_string(),
+                age: None,
+            },
+        );
+        let expected = Complex {
+            name: Some("Charlie".to_string()),
+            fun_level: Fun::Somewhat,
+            map,
+            message_map,
+            list: vec![3.1415926, 2.71828],
+            boolean: true,
+            int16: -3,
+            int32: 42,
+            int64: 123456789,
+            uint16: 3,
+            uint32: 42,
+            uint64: 123456789,
+            byte: 17,
+            float64: 3.1415926,
+        };
+        assert_eq!(deserialized, expected);
     }
 }

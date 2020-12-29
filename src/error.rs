@@ -43,6 +43,8 @@ pub enum Error {
     InvalidUnit,
     #[error("Got data when none was expected")]
     UnexpectedData,
+    #[error("Invalid message terminator byte")]
+    InvalidMessageTerminator,
 }
 
 impl ser::Error for Error {
