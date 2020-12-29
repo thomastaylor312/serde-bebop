@@ -1,4 +1,3 @@
-use std::ops::{AddAssign, MulAssign, Neg};
 use std::{convert::TryInto, mem::size_of};
 
 use serde::de::{
@@ -9,27 +8,27 @@ use serde::Deserialize;
 
 use crate::error::{Error, Result};
 
+const BEBOP_STARTING_INDEX: usize = 1;
+
 pub struct Deserializer<'de> {
     // This string starts with the input data and characters are truncated off
     // the beginning as data is parsed.
     input: &'de [u8],
-    next_index: Option<usize>,
+    skipped_index: bool,
+    is_message: bool,
 }
 
 impl<'de> Deserializer<'de> {
     pub fn from_bytes(input: &'de [u8]) -> Self {
         Deserializer {
             input,
-            next_index: None,
+            skipped_index: false,
+            is_message: false,
         }
     }
 }
 
-// By convention, the public API of a Serde deserializer is one or more
-// `from_xyz` methods such as `from_str`, `from_bytes`, or `from_reader`
-// depending on what Rust types the deserializer is able to consume as input.
-//
-// This basic deserializer supports only `from_str`.
+/// Deserializes from raw bytes to the given type
 pub fn from_bytes<'a, T>(s: &'a [u8]) -> Result<T>
 where
     T: Deserialize<'a>,
@@ -43,49 +42,7 @@ where
     }
 }
 
-// SERDE IS NOT A PARSING LIBRARY. This impl block defines a few basic parsing
-// functions from scratch. More complicated formats may wish to use a dedicated
-// parsing library to help implement their Serde deserializer.
 impl<'de> Deserializer<'de> {
-    // Look at the first character in the input without consuming it.
-    fn peek_char(&mut self) -> Result<char> {
-        todo!()
-    }
-
-    // Consume the first character in the input.
-    fn next_char(&mut self) -> Result<char> {
-        let ch = self.peek_char()?;
-        self.input = &self.input[ch.len_utf8()..];
-        Ok(ch)
-    }
-
-    // Parse the JSON identifier `true` or `false`.
-    fn parse_bool(&mut self) -> Result<bool> {
-        Ok(true)
-    }
-
-    // Parse a group of decimal digits as an unsigned integer of type T.
-    //
-    // This implementation is a bit too lenient, for example `001` is not
-    // allowed in JSON. Also the various arithmetic operations can overflow and
-    // panic or return bogus data. But it is good enough for example code!
-    fn parse_unsigned<T>(&mut self) -> Result<T>
-    where
-        T: AddAssign<T> + MulAssign<T> + From<u8>,
-    {
-        todo!()
-    }
-
-    // Parse a possible minus sign followed by a group of decimal digits as a
-    // signed integer of type T.
-    fn parse_signed<T>(&mut self) -> Result<T>
-    where
-        T: Neg<Output = T> + AddAssign<T> + MulAssign<T> + From<i8>,
-    {
-        // Optional minus sign, delegate to `parse_unsigned`, negate if negative.
-        unimplemented!()
-    }
-
     fn parse_string(&mut self) -> Result<&'de str> {
         // First, let's get the length of the string
         let str_len = self.parse_object_size()?;
@@ -129,7 +86,9 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        unimplemented!()
+        Err(Error::Message(
+            "Bebop does not support deserializer_any".to_string(),
+        ))
     }
 
     fn deserialize_bool<V>(self, visitor: V) -> Result<V::Value>
@@ -375,23 +334,14 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        match self.next_index.take() {
+        if self.is_message && self.skipped_index {
             // We are handling a message, so check for the index
-            Some(index) => {
-                let possible_index = *self.input.first().ok_or(Error::Eof)? as usize;
-                // Either way, the index increments, so we know that this one
-                // wasn't present in the message (or was handled)
-                self.next_index = Some(index + 1);
-                if index == possible_index {
-                    // Consume the index so the next part parses properly
-                    self.input = &self.input[1..];
-                    visitor.visit_some(self)
-                } else {
-                    visitor.visit_none()
-                }
-            }
+            visitor.visit_none()
+        } else if self.is_message && !self.skipped_index {
+            visitor.visit_some(self)
+        } else {
             // We are handling a struct, so the data is present. Just return a visit_some
-            None => visitor.visit_some(self),
+            visitor.visit_some(self)
         }
     }
 
@@ -402,22 +352,14 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
     {
         // A unit in a struct means that we should always be missing a field in
         // a message. A Bebop struct cannot contain it
-        match self.next_index.take() {
-            // We are handling a message, so check for the index
-            Some(index) => {
-                let possible_index = *self.input.first().ok_or(Error::Eof)? as usize;
-                // Either way, the index increments, so we know that this one
-                // wasn't present in the message (or was handled)
-                self.next_index = Some(index + 1);
-                if index == possible_index {
-                    // A unit type means there is a missing index, so return an error
-                    return Err(Error::UnexpectedData);
-                } else {
-                    visitor.visit_unit()
-                }
-            }
-            // We are handling a struct, so the data is present. Just return a visit_some
-            None => return Err(Error::InvalidUnit),
+        if self.is_message && self.skipped_index {
+            // A unit type means there is a missing index, so return an error if there is data
+            Err(Error::UnexpectedData)
+        } else if self.is_message && !self.skipped_index {
+            visitor.visit_unit()
+        } else {
+            // Structs cannot contain empty
+            Err(Error::InvalidUnit)
         }
     }
 
@@ -479,14 +421,8 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
         visitor.visit_seq(List::new(&mut self, len))
     }
 
-    // Structs look just like maps in JSON.
-    //
-    // Notice the `fields` parameter - a "struct" in the Serde data model means
-    // that the `Deserialize` implementation is required to know what the fields
-    // are before even looking at the input data. Any key-value pairing in which
-    // the fields cannot be known ahead of time is probably a map.
     fn deserialize_struct<V>(
-        self,
+        mut self,
         _name: &'static str,
         _fields: &'static [&'static str],
         visitor: V,
@@ -497,8 +433,23 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
         // Parse the first 4 bytes as a u32. If that length matches the length
         // of the rest of the body, it is a message. Otherwise, assume it is a
         // Bebop struct and handle accordingly
-        // If it is a message, make sure to set the message index (starting with 1)
-        self.deserialize_map(visitor)
+        let size = size_of::<u32>();
+        // Before we split, check remaining output to avoid panic
+        if size > self.input.len() {
+            return Err(Error::Eof);
+        }
+        // Just peek the bytes, don't consume them yet
+        let bytes = &self.input[..size];
+        let len =
+            u32::from_le_bytes(bytes.try_into().map_err(|_| Error::InvalidNumberBytes)?) as usize;
+        let next_index = if self.input[size..].len() == len {
+            self.is_message = true;
+            // If it is a message, make sure to set the message index (starting with 1)
+            Some(BEBOP_STARTING_INDEX)
+        } else {
+            None
+        };
+        visitor.visit_seq(StructAccess::new(&mut self, next_index))
     }
 
     fn deserialize_enum<V>(
@@ -517,11 +468,13 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
     // the variant of an enum. In JSON, struct fields and enum variants are
     // represented as strings. In other formats they may be represented as
     // numeric indices.
-    fn deserialize_identifier<V>(self, visitor: V) -> Result<V::Value>
+    fn deserialize_identifier<V>(self, _visitor: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
-        self.deserialize_str(visitor)
+        Err(Error::Message(
+            "Bebop does not support deserialize identifier".to_string(),
+        ))
     }
 
     fn deserialize_ignored_any<V>(self, visitor: V) -> Result<V::Value>
@@ -566,6 +519,49 @@ impl<'de, 'a> SeqAccess<'de> for List<'a, 'de> {
     }
 }
 
+struct StructAccess<'a, 'de: 'a> {
+    de: &'a mut Deserializer<'de>,
+    next_index: Option<usize>,
+}
+
+impl<'a, 'de> StructAccess<'a, 'de> {
+    fn new(de: &'a mut Deserializer<'de>, next_index: Option<usize>) -> Self {
+        StructAccess { de, next_index }
+    }
+}
+
+impl<'de, 'a> SeqAccess<'de> for StructAccess<'a, 'de> {
+    type Error = Error;
+
+    fn next_element_seed<T>(&mut self, seed: T) -> Result<Option<T::Value>>
+    where
+        T: DeserializeSeed<'de>,
+    {
+        // If we get to the end of the data we are done
+        if self.de.input.is_empty() {
+            Ok(None)
+        } else {
+            // Otherwise, increment the current index (if a message) and trim the index off the input if it is a message
+            if let Some(i) = self.next_index.take() {
+                let possible_index = *self.de.input.first().ok_or(Error::Eof)? as usize;
+                // Either way, the index increments, so we know that this one
+                // wasn't present in the message (or was handled)
+                self.next_index = Some(i + 1);
+                if i == possible_index {
+                    // Consume the index so the next part parses properly
+                    self.de.input = &self.de.input[1..];
+                    // Let the deserializer know that this index wasn't skipped
+                    self.de.skipped_index = false;
+                } else {
+                    // Let the deserializer that this one was skipped
+                    self.de.skipped_index = true;
+                }
+            }
+            seed.deserialize(&mut *self.de).map(Some)
+        }
+    }
+}
+
 impl<'de, 'a> MapAccess<'de> for List<'a, 'de> {
     type Error = Error;
 
@@ -604,7 +600,7 @@ impl<'a, 'de> EnumAccess<'de> for &'a mut Deserializer<'de> {
         let index = self.parse_object_size()?;
         let val = seed.deserialize(index.into_deserializer())?;
         // Parse the colon separating map key from value.
-        Ok(val, self)
+        Ok((val, self))
     }
 }
 
@@ -619,21 +615,21 @@ impl<'a, 'de> VariantAccess<'de> for &'a mut Deserializer<'de> {
     }
 
     // The rest of these all return errors as they are not supported in bebop
-    fn newtype_variant_seed<T>(self, seed: T) -> Result<T::Value>
+    fn newtype_variant_seed<T>(self, _seed: T) -> Result<T::Value>
     where
         T: DeserializeSeed<'de>,
     {
         Err(Error::VariantDataNotAllowed)
     }
 
-    fn tuple_variant<V>(self, _len: usize, visitor: V) -> Result<V::Value>
+    fn tuple_variant<V>(self, _len: usize, _visitor: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
         Err(Error::VariantDataNotAllowed)
     }
 
-    fn struct_variant<V>(self, _fields: &'static [&'static str], visitor: V) -> Result<V::Value>
+    fn struct_variant<V>(self, _fields: &'static [&'static str], _visitor: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
