@@ -29,6 +29,20 @@ pub enum Error {
     TrailingBytes,
     #[error("Expected to serialize {0} struct members, got {1}")]
     StructLengthMismatch(usize, usize),
+    #[error("Found byte that does not parse to a bool")]
+    InvalidBool,
+    #[error("Got invalid number of bytes when parsing a numeric value")]
+    InvalidNumberBytes,
+    #[error("Got invalid UTF-8 data when parsing a string")]
+    InvalidUtf8,
+    #[error("Expected a string with an exact length of 1 to deserialize as a char")]
+    InvalidChar,
+    #[error("Unable to deserialize message. Missing `Option` in struct")]
+    InvalidStruct,
+    #[error("Unable to deserialze a Bebop struct to a Rust struct containing an option. It must be a Bebop message")]
+    InvalidUnit,
+    #[error("Got data when none was expected")]
+    UnexpectedData,
 }
 
 impl ser::Error for Error {

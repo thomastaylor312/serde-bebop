@@ -1,4 +1,5 @@
 use std::ops::{AddAssign, MulAssign, Neg};
+use std::{convert::TryInto, mem::size_of};
 
 use serde::de::{
     self, DeserializeSeed, EnumAccess, IntoDeserializer, MapAccess, SeqAccess, VariantAccess,
@@ -12,11 +13,15 @@ pub struct Deserializer<'de> {
     // This string starts with the input data and characters are truncated off
     // the beginning as data is parsed.
     input: &'de [u8],
+    next_index: Option<usize>,
 }
 
 impl<'de> Deserializer<'de> {
     pub fn from_bytes(input: &'de [u8]) -> Self {
-        Deserializer { input }
+        Deserializer {
+            input,
+            next_index: None,
+        }
     }
 }
 
@@ -81,47 +86,68 @@ impl<'de> Deserializer<'de> {
         unimplemented!()
     }
 
-    // Parse a string until the next '"' character.
-    //
-    // Makes no attempt to handle escape sequences. What did you expect? This is
-    // example code!
     fn parse_string(&mut self) -> Result<&'de str> {
-        todo!()
+        // First, let's get the length of the string
+        let str_len = self.parse_object_size()?;
+
+        // Now that we have the string length, split again
+        if str_len > self.input.len() {
+            return Err(Error::Eof);
+        }
+        let (data, remaining) = self.input.split_at(str_len);
+        self.input = remaining;
+
+        // Validate that the string is actually utf-8
+        Ok(std::str::from_utf8(data).map_err(|_| Error::InvalidUtf8)?)
+    }
+
+    /// grabs the size of the current object in the input, advances the input to
+    /// the start of the object, and returns the size
+    fn parse_object_size(&mut self) -> Result<usize> {
+        let size = size_of::<u32>();
+        // Before we split, check remaining output to avoid panic
+        if size > self.input.len() {
+            return Err(Error::Eof);
+        }
+        let (raw, remaining) = self.input.split_at(size);
+        self.input = remaining;
+        Ok(u32::from_le_bytes(raw.try_into().map_err(|_| Error::InvalidNumberBytes)?) as usize)
     }
 }
 
 impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
     type Error = Error;
 
+    fn is_human_readable(&self) -> bool {
+        false
+    }
+
     // Look at the input data to decide what Serde data model type to
     // deserialize as. Not all data formats are able to support this operation.
     // Formats that support `deserialize_any` are known as self-describing.
-    fn deserialize_any<V>(self, visitor: V) -> Result<V::Value>
+    fn deserialize_any<V>(self, _visitor: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
         unimplemented!()
     }
 
-    // Uses the `parse_bool` parsing function defined above to read the JSON
-    // identifier `true` or `false` from the input.
-    //
-    // Parsing refers to looking at the input and deciding that it contains the
-    // JSON value `true` or `false`.
-    //
-    // Deserialization refers to mapping that JSON value into Serde's data
-    // model by invoking one of the `Visitor` methods. In the case of JSON and
-    // bool that mapping is straightforward so the distinction may seem silly,
-    // but in other cases Deserializers sometimes perform non-obvious mappings.
-    // For example the TOML format has a Datetime type and Serde's data model
-    // does not. In the `toml` crate, a Datetime in the input is deserialized by
-    // mapping it to a Serde data model "struct" type with a special name and a
-    // single field containing the Datetime represented as a string.
     fn deserialize_bool<V>(self, visitor: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
-        visitor.visit_bool(self.parse_bool()?)
+        // Grab the single byte representing the bool
+        let byte = self.input.first().ok_or(Error::Eof)?;
+        let val = if *byte == 0u8 {
+            false
+        } else if *byte == 1u8 {
+            true
+        } else {
+            return Err(Error::InvalidBool);
+        };
+        // Advance the input
+        self.input = &self.input[1..];
+        visitor.visit_bool(val)
     }
 
     // The `parse_signed` function is generic over the integer type `T` so here
@@ -130,82 +156,169 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        visitor.visit_i8(self.parse_signed()?)
+        let size = size_of::<i8>();
+        // Before we split, check remaining output to avoid panic
+        if size > self.input.len() {
+            return Err(Error::Eof);
+        }
+        let (raw, remaining) = self.input.split_at(size);
+        self.input = remaining;
+        visitor.visit_i8(i8::from_le_bytes(
+            raw.try_into().map_err(|_| Error::InvalidNumberBytes)?,
+        ))
     }
 
     fn deserialize_i16<V>(self, visitor: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
-        visitor.visit_i16(self.parse_signed()?)
+        let size = size_of::<i16>();
+        // Before we split, check remaining output to avoid panic
+        if size > self.input.len() {
+            return Err(Error::Eof);
+        }
+        let (raw, remaining) = self.input.split_at(size);
+        self.input = remaining;
+        visitor.visit_i16(i16::from_le_bytes(
+            raw.try_into().map_err(|_| Error::InvalidNumberBytes)?,
+        ))
     }
 
     fn deserialize_i32<V>(self, visitor: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
-        visitor.visit_i32(self.parse_signed()?)
+        let size = size_of::<i32>();
+        // Before we split, check remaining output to avoid panic
+        if size > self.input.len() {
+            return Err(Error::Eof);
+        }
+        let (raw, remaining) = self.input.split_at(size);
+        self.input = remaining;
+        visitor.visit_i32(i32::from_le_bytes(
+            raw.try_into().map_err(|_| Error::InvalidNumberBytes)?,
+        ))
     }
 
     fn deserialize_i64<V>(self, visitor: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
-        visitor.visit_i64(self.parse_signed()?)
+        let size = size_of::<i64>();
+        // Before we split, check remaining output to avoid panic
+        if size > self.input.len() {
+            return Err(Error::Eof);
+        }
+        let (raw, remaining) = self.input.split_at(size);
+        self.input = remaining;
+        visitor.visit_i64(i64::from_le_bytes(
+            raw.try_into().map_err(|_| Error::InvalidNumberBytes)?,
+        ))
     }
 
     fn deserialize_u8<V>(self, visitor: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
-        visitor.visit_u8(self.parse_unsigned()?)
+        // This is easier than the others because we just pop a byte off of the input
+        let byte = self.input.first().ok_or(Error::Eof)?;
+        self.input = &self.input[1..];
+        visitor.visit_u8(*byte)
     }
 
     fn deserialize_u16<V>(self, visitor: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
-        visitor.visit_u16(self.parse_unsigned()?)
+        let size = size_of::<u16>();
+        // Before we split, check remaining output to avoid panic
+        if size > self.input.len() {
+            return Err(Error::Eof);
+        }
+        let (raw, remaining) = self.input.split_at(size);
+        self.input = remaining;
+        visitor.visit_u16(u16::from_le_bytes(
+            raw.try_into().map_err(|_| Error::InvalidNumberBytes)?,
+        ))
     }
 
     fn deserialize_u32<V>(self, visitor: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
-        visitor.visit_u32(self.parse_unsigned()?)
+        let size = size_of::<u32>();
+        // Before we split, check remaining output to avoid panic
+        if size > self.input.len() {
+            return Err(Error::Eof);
+        }
+        let (raw, remaining) = self.input.split_at(size);
+        self.input = remaining;
+        visitor.visit_u32(u32::from_le_bytes(
+            raw.try_into().map_err(|_| Error::InvalidNumberBytes)?,
+        ))
     }
 
     fn deserialize_u64<V>(self, visitor: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
-        visitor.visit_u64(self.parse_unsigned()?)
+        let size = size_of::<u64>();
+        // Before we split, check remaining output to avoid panic
+        if size > self.input.len() {
+            return Err(Error::Eof);
+        }
+        let (raw, remaining) = self.input.split_at(size);
+        self.input = remaining;
+        visitor.visit_u64(u64::from_le_bytes(
+            raw.try_into().map_err(|_| Error::InvalidNumberBytes)?,
+        ))
     }
 
     // Float parsing is stupidly hard.
-    fn deserialize_f32<V>(self, _visitor: V) -> Result<V::Value>
+    fn deserialize_f32<V>(self, visitor: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
-        unimplemented!()
+        let size = size_of::<f32>();
+        // Before we split, check remaining output to avoid panic
+        if size > self.input.len() {
+            return Err(Error::Eof);
+        }
+        let (raw, remaining) = self.input.split_at(size);
+        self.input = remaining;
+        visitor.visit_f32(f32::from_le_bytes(
+            raw.try_into().map_err(|_| Error::InvalidNumberBytes)?,
+        ))
     }
 
     // Float parsing is stupidly hard.
-    fn deserialize_f64<V>(self, _visitor: V) -> Result<V::Value>
+    fn deserialize_f64<V>(self, visitor: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
-        unimplemented!()
+        let size = size_of::<f64>();
+        // Before we split, check remaining output to avoid panic
+        if size > self.input.len() {
+            return Err(Error::Eof);
+        }
+        let (raw, remaining) = self.input.split_at(size);
+        self.input = remaining;
+        visitor.visit_f64(f64::from_le_bytes(
+            raw.try_into().map_err(|_| Error::InvalidNumberBytes)?,
+        ))
     }
 
-    // The `Serializer` implementation on the previous page serialized chars as
-    // single-character strings so handle that representation here.
-    fn deserialize_char<V>(self, _visitor: V) -> Result<V::Value>
+    fn deserialize_char<V>(self, visitor: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
-        // Parse a string, check that it is one character, call `visit_char`.
-        unimplemented!()
+        // Chars are serialized as strings, so deserialize it and check its length
+        let data = self.parse_string()?;
+        if data.chars().count() != 1 {
+            return Err(Error::InvalidChar);
+        }
+        // We just checked length, so unwrapping is ok
+        visitor.visit_char(data.chars().next().unwrap())
     }
 
     // Refer to the "Understanding deserializer lifetimes" page for information
@@ -221,44 +334,65 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        self.deserialize_str(visitor)
+        visitor.visit_string(self.parse_string()?.to_owned())
     }
 
     // The `Serializer` implementation on the previous page serialized byte
     // arrays as JSON arrays of bytes. Handle that representation here.
-    fn deserialize_bytes<V>(self, _visitor: V) -> Result<V::Value>
+    fn deserialize_bytes<V>(self, visitor: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
-        unimplemented!()
+        // Byte arrays can be read directly off the input after getting the length
+        let len = self.parse_object_size()?;
+
+        // Now grab the data
+        if len > self.input.len() {
+            return Err(Error::Eof);
+        }
+        let (data, remaining) = self.input.split_at(len);
+        self.input = remaining;
+        visitor.visit_bytes(data)
     }
 
-    fn deserialize_byte_buf<V>(self, _visitor: V) -> Result<V::Value>
+    fn deserialize_byte_buf<V>(self, visitor: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
-        unimplemented!()
+        // Byte arrays can be read directly off the input after getting the length
+        let len = self.parse_object_size()?;
+
+        // Now grab the data
+        if len > self.input.len() {
+            return Err(Error::Eof);
+        }
+        let (data, remaining) = self.input.split_at(len);
+        self.input = remaining;
+        visitor.visit_byte_buf(data.to_owned())
     }
 
-    // An absent optional is represented as the JSON `null` and a present
-    // optional is represented as just the contained value.
-    //
-    // As commented in `Serializer` implementation, this is a lossy
-    // representation. For example the values `Some(())` and `None` both
-    // serialize as just `null`. Unfortunately this is typically what people
-    // expect when working with JSON. Other formats are encouraged to behave
-    // more intelligently if possible.
     fn deserialize_option<V>(self, visitor: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
-        // if self.input.starts_with("null") {
-        //     self.input = &self.input["null".len()..];
-        //     visitor.visit_none()
-        // } else {
-        //     visitor.visit_some(self)
-        // }
-        todo!()
+        match self.next_index.take() {
+            // We are handling a message, so check for the index
+            Some(index) => {
+                let possible_index = *self.input.first().ok_or(Error::Eof)? as usize;
+                // Either way, the index increments, so we know that this one
+                // wasn't present in the message (or was handled)
+                self.next_index = Some(index + 1);
+                if index == possible_index {
+                    // Consume the index so the next part parses properly
+                    self.input = &self.input[1..];
+                    visitor.visit_some(self)
+                } else {
+                    visitor.visit_none()
+                }
+            }
+            // We are handling a struct, so the data is present. Just return a visit_some
+            None => visitor.visit_some(self),
+        }
     }
 
     // In Serde, unit means an anonymous value containing no data.
@@ -266,7 +400,25 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        todo!()
+        // A unit in a struct means that we should always be missing a field in
+        // a message. A Bebop struct cannot contain it
+        match self.next_index.take() {
+            // We are handling a message, so check for the index
+            Some(index) => {
+                let possible_index = *self.input.first().ok_or(Error::Eof)? as usize;
+                // Either way, the index increments, so we know that this one
+                // wasn't present in the message (or was handled)
+                self.next_index = Some(index + 1);
+                if index == possible_index {
+                    // A unit type means there is a missing index, so return an error
+                    return Err(Error::UnexpectedData);
+                } else {
+                    visitor.visit_unit()
+                }
+            }
+            // We are handling a struct, so the data is present. Just return a visit_some
+            None => return Err(Error::InvalidUnit),
+        }
     }
 
     // Unit struct means a named value containing no data.
@@ -294,28 +446,11 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        // // Parse the opening bracket of the sequence.
-        // if self.next_char()? == '[' {
-        //     // Give the visitor access to each element of the sequence.
-        //     let value = visitor.visit_seq(CommaSeparated::new(&mut self))?;
-        //     // Parse the closing bracket of the sequence.
-        //     if self.next_char()? == ']' {
-        //         Ok(value)
-        //     } else {
-        //         Err(Error::ExpectedArrayEnd)
-        //     }
-        // } else {
-        //     Err(Error::ExpectedArray)
-        // }
-        todo!()
+        let len = self.parse_object_size()?;
+        visitor.visit_seq(List::new(&mut self, len))
     }
 
-    // Tuples look just like sequences in JSON. Some formats may be able to
-    // represent tuples more efficiently.
-    //
-    // As indicated by the length parameter, the `Deserialize` implementation
-    // for a tuple in the Serde data model is required to know the length of the
-    // tuple before even looking at the input data.
+    // We treat tuples like arrays
     fn deserialize_tuple<V>(self, _len: usize, visitor: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
@@ -323,7 +458,7 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
         self.deserialize_seq(visitor)
     }
 
-    // Tuple structs look just like sequences in JSON.
+    // Tuple structs are also like arrays
     fn deserialize_tuple_struct<V>(
         self,
         _name: &'static str,
@@ -343,20 +478,8 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        // Parse the opening brace of the map.
-        // if self.next_char()? == '{' {
-        //     // Give the visitor access to each entry of the map.
-        //     let value = visitor.visit_map(CommaSeparated::new(&mut self))?;
-        //     // Parse the closing brace of the map.
-        //     if self.next_char()? == '}' {
-        //         Ok(value)
-        //     } else {
-        //         Err(Error::ExpectedMapEnd)
-        //     }
-        // } else {
-        //     Err(Error::ExpectedMap)
-        // }
-        todo!()
+        let len = self.parse_object_size()?;
+        visitor.visit_seq(List::new(&mut self, len))
     }
 
     // Structs look just like maps in JSON.
@@ -377,6 +500,7 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
         // Parse the first 4 bytes as a u32. If that length matches the length
         // of the rest of the body, it is a message. Otherwise, assume it is a
         // Bebop struct and handle accordingly
+        // If it is a message, make sure to set the message index (starting with 1)
         self.deserialize_map(visitor)
     }
 
@@ -418,17 +542,6 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
         self.deserialize_str(visitor)
     }
 
-    // Like `deserialize_any` but indicates to the `Deserializer` that it makes
-    // no difference which `Visitor` method is called because the data is
-    // ignored.
-    //
-    // Some deserializers are able to implement this more efficiently than
-    // `deserialize_any`, for example by rapidly skipping over matched
-    // delimiters without paying close attention to the data in between.
-    //
-    // Some formats are not able to implement this at all. Formats that can
-    // implement `deserialize_any` and `deserialize_ignored_any` are known as
-    // self-describing.
     fn deserialize_ignored_any<V>(self, visitor: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
@@ -437,23 +550,20 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
     }
 }
 
-// In order to handle commas correctly when deserializing a JSON array or map,
-// we need to track whether we are on the first element or past the first
-// element.
-struct CommaSeparated<'a, 'de: 'a> {
+struct List<'a, 'de: 'a> {
     de: &'a mut Deserializer<'de>,
-    first: bool,
+    expected_len: usize,
 }
 
-impl<'a, 'de> CommaSeparated<'a, 'de> {
-    fn new(de: &'a mut Deserializer<'de>) -> Self {
-        CommaSeparated { de, first: true }
+impl<'a, 'de> List<'a, 'de> {
+    fn new(de: &'a mut Deserializer<'de>, expected_len: usize) -> Self {
+        List { de, expected_len }
     }
 }
 
 // `SeqAccess` is provided to the `Visitor` to give it the ability to iterate
 // through elements of the sequence.
-impl<'de, 'a> SeqAccess<'de> for CommaSeparated<'a, 'de> {
+impl<'de, 'a> SeqAccess<'de> for List<'a, 'de> {
     type Error = Error;
 
     fn next_element_seed<T>(&mut self, seed: T) -> Result<Option<T::Value>>
@@ -461,22 +571,23 @@ impl<'de, 'a> SeqAccess<'de> for CommaSeparated<'a, 'de> {
         T: DeserializeSeed<'de>,
     {
         // Check if there are no more elements.
-        if self.de.peek_char()? == ']' {
-            return Ok(None);
-        }
-        // Comma is required before every element except the first.
-        if !self.first && self.de.next_char()? != ',' {
-            return Err(Error::Message("foo".to_string()));
-        }
-        self.first = false;
-        // Deserialize an array element.
-        seed.deserialize(&mut *self.de).map(Some)
+        // if self.de.peek_char()? == ']' {
+        //     return Ok(None);
+        // }
+        // // Comma is required before every element except the first.
+        // if !self.first && self.de.next_char()? != ',' {
+        //     return Err(Error::Message("foo".to_string()));
+        // }
+        // self.first = false;
+        // // Deserialize an array element.
+        // seed.deserialize(&mut *self.de).map(Some)
+        todo!()
     }
 }
 
 // `MapAccess` is provided to the `Visitor` to give it the ability to iterate
 // through entries of the map.
-impl<'de, 'a> MapAccess<'de> for CommaSeparated<'a, 'de> {
+impl<'de, 'a> MapAccess<'de> for List<'a, 'de> {
     type Error = Error;
 
     fn next_key_seed<K>(&mut self, seed: K) -> Result<Option<K::Value>>
@@ -484,16 +595,17 @@ impl<'de, 'a> MapAccess<'de> for CommaSeparated<'a, 'de> {
         K: DeserializeSeed<'de>,
     {
         // Check if there are no more entries.
-        if self.de.peek_char()? == '}' {
-            return Ok(None);
-        }
-        // Comma is required before every entry except the first.
-        if !self.first && self.de.next_char()? != ',' {
-            return Err(Error::Message("foo".to_string()));
-        }
-        self.first = false;
-        // Deserialize a map key.
-        seed.deserialize(&mut *self.de).map(Some)
+        // if self.de.peek_char()? == '}' {
+        //     return Ok(None);
+        // }
+        // // Comma is required before every entry except the first.
+        // if !self.first && self.de.next_char()? != ',' {
+        //     return Err(Error::Message("foo".to_string()));
+        // }
+        // self.first = false;
+        // // Deserialize a map key.
+        // seed.deserialize(&mut *self.de).map(Some)
+        todo!()
     }
 
     fn next_value_seed<V>(&mut self, seed: V) -> Result<V::Value>
@@ -503,11 +615,12 @@ impl<'de, 'a> MapAccess<'de> for CommaSeparated<'a, 'de> {
         // It doesn't make a difference whether the colon is parsed at the end
         // of `next_key_seed` or at the beginning of `next_value_seed`. In this
         // case the code is a bit simpler having it here.
-        if self.de.next_char()? != ':' {
-            return Err(Error::Message("foo".to_string()));
-        }
-        // Deserialize a map value.
-        seed.deserialize(&mut *self.de)
+        // if self.de.next_char()? != ':' {
+        //     return Err(Error::Message("foo".to_string()));
+        // }
+        // // Deserialize a map value.
+        // seed.deserialize(&mut *self.de)
+        todo!()
     }
 }
 
