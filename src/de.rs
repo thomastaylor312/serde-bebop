@@ -6,7 +6,7 @@ use serde::de::{
 };
 use serde::Deserialize;
 
-use error::{Error, Result};
+use crate::error::{Error, Result};
 
 pub struct Deserializer<'de> {
     // This string starts with the input data and characters are truncated off
@@ -15,10 +15,6 @@ pub struct Deserializer<'de> {
 }
 
 impl<'de> Deserializer<'de> {
-    // By convention, `Deserializer` constructors are named like `from_xyz`.
-    // That way basic use cases are satisfied by something like
-    // `serde_json::from_str(...)` while advanced use cases that require a
-    // deserializer can make one with `serde_json::Deserializer::from_str(...)`.
     pub fn from_bytes(input: &'de [u8]) -> Self {
         Deserializer { input }
     }
@@ -38,7 +34,7 @@ where
     if deserializer.input.is_empty() {
         Ok(t)
     } else {
-        Err(Error::TrailingCharacters)
+        Err(Error::TrailingBytes)
     }
 }
 
@@ -48,7 +44,7 @@ where
 impl<'de> Deserializer<'de> {
     // Look at the first character in the input without consuming it.
     fn peek_char(&mut self) -> Result<char> {
-        self.input.chars().next().ok_or(Error::Eof)
+        todo!()
     }
 
     // Consume the first character in the input.
@@ -60,15 +56,7 @@ impl<'de> Deserializer<'de> {
 
     // Parse the JSON identifier `true` or `false`.
     fn parse_bool(&mut self) -> Result<bool> {
-        if self.input.starts_with("true") {
-            self.input = &self.input["true".len()..];
-            Ok(true)
-        } else if self.input.starts_with("false") {
-            self.input = &self.input["false".len()..];
-            Ok(false)
-        } else {
-            Err(Error::ExpectedBoolean)
-        }
+        Ok(true)
     }
 
     // Parse a group of decimal digits as an unsigned integer of type T.
@@ -80,24 +68,7 @@ impl<'de> Deserializer<'de> {
     where
         T: AddAssign<T> + MulAssign<T> + From<u8>,
     {
-        let mut int = match self.next_char()? {
-            ch @ '0'..='9' => T::from(ch as u8 - b'0'),
-            _ => {
-                return Err(Error::ExpectedInteger);
-            }
-        };
-        loop {
-            match self.input.chars().next() {
-                Some(ch @ '0'..='9') => {
-                    self.input = &self.input[1..];
-                    int *= T::from(10);
-                    int += T::from(ch as u8 - b'0');
-                }
-                _ => {
-                    return Ok(int);
-                }
-            }
-        }
+        todo!()
     }
 
     // Parse a possible minus sign followed by a group of decimal digits as a
@@ -115,17 +86,7 @@ impl<'de> Deserializer<'de> {
     // Makes no attempt to handle escape sequences. What did you expect? This is
     // example code!
     fn parse_string(&mut self) -> Result<&'de str> {
-        if self.next_char()? != '"' {
-            return Err(Error::ExpectedString);
-        }
-        match self.input.find('"') {
-            Some(len) => {
-                let s = &self.input[..len];
-                self.input = &self.input[len + 1..];
-                Ok(s)
-            }
-            None => Err(Error::Eof),
-        }
+        todo!()
     }
 }
 
@@ -139,16 +100,7 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        match self.peek_char()? {
-            'n' => self.deserialize_unit(visitor),
-            't' | 'f' => self.deserialize_bool(visitor),
-            '"' => self.deserialize_str(visitor),
-            '0'..='9' => self.deserialize_u64(visitor),
-            '-' => self.deserialize_i64(visitor),
-            '[' => self.deserialize_seq(visitor),
-            '{' => self.deserialize_map(visitor),
-            _ => Err(Error::Syntax),
-        }
+        unimplemented!()
     }
 
     // Uses the `parse_bool` parsing function defined above to read the JSON
@@ -300,12 +252,13 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        if self.input.starts_with("null") {
-            self.input = &self.input["null".len()..];
-            visitor.visit_none()
-        } else {
-            visitor.visit_some(self)
-        }
+        // if self.input.starts_with("null") {
+        //     self.input = &self.input["null".len()..];
+        //     visitor.visit_none()
+        // } else {
+        //     visitor.visit_some(self)
+        // }
+        todo!()
     }
 
     // In Serde, unit means an anonymous value containing no data.
@@ -313,12 +266,7 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        if self.input.starts_with("null") {
-            self.input = &self.input["null".len()..];
-            visitor.visit_unit()
-        } else {
-            Err(Error::ExpectedNull)
-        }
+        todo!()
     }
 
     // Unit struct means a named value containing no data.
@@ -346,19 +294,20 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        // Parse the opening bracket of the sequence.
-        if self.next_char()? == '[' {
-            // Give the visitor access to each element of the sequence.
-            let value = visitor.visit_seq(CommaSeparated::new(&mut self))?;
-            // Parse the closing bracket of the sequence.
-            if self.next_char()? == ']' {
-                Ok(value)
-            } else {
-                Err(Error::ExpectedArrayEnd)
-            }
-        } else {
-            Err(Error::ExpectedArray)
-        }
+        // // Parse the opening bracket of the sequence.
+        // if self.next_char()? == '[' {
+        //     // Give the visitor access to each element of the sequence.
+        //     let value = visitor.visit_seq(CommaSeparated::new(&mut self))?;
+        //     // Parse the closing bracket of the sequence.
+        //     if self.next_char()? == ']' {
+        //         Ok(value)
+        //     } else {
+        //         Err(Error::ExpectedArrayEnd)
+        //     }
+        // } else {
+        //     Err(Error::ExpectedArray)
+        // }
+        todo!()
     }
 
     // Tuples look just like sequences in JSON. Some formats may be able to
@@ -395,18 +344,19 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
         V: Visitor<'de>,
     {
         // Parse the opening brace of the map.
-        if self.next_char()? == '{' {
-            // Give the visitor access to each entry of the map.
-            let value = visitor.visit_map(CommaSeparated::new(&mut self))?;
-            // Parse the closing brace of the map.
-            if self.next_char()? == '}' {
-                Ok(value)
-            } else {
-                Err(Error::ExpectedMapEnd)
-            }
-        } else {
-            Err(Error::ExpectedMap)
-        }
+        // if self.next_char()? == '{' {
+        //     // Give the visitor access to each entry of the map.
+        //     let value = visitor.visit_map(CommaSeparated::new(&mut self))?;
+        //     // Parse the closing brace of the map.
+        //     if self.next_char()? == '}' {
+        //         Ok(value)
+        //     } else {
+        //         Err(Error::ExpectedMapEnd)
+        //     }
+        // } else {
+        //     Err(Error::ExpectedMap)
+        // }
+        todo!()
     }
 
     // Structs look just like maps in JSON.
@@ -424,6 +374,9 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
     where
         V: Visitor<'de>,
     {
+        // Parse the first 4 bytes as a u32. If that length matches the length
+        // of the rest of the body, it is a message. Otherwise, assume it is a
+        // Bebop struct and handle accordingly
         self.deserialize_map(visitor)
     }
 
@@ -436,21 +389,22 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        if self.peek_char()? == '"' {
-            // Visit a unit variant.
-            visitor.visit_enum(self.parse_string()?.into_deserializer())
-        } else if self.next_char()? == '{' {
-            // Visit a newtype variant, tuple variant, or struct variant.
-            let value = visitor.visit_enum(Enum::new(self))?;
-            // Parse the matching close brace.
-            if self.next_char()? == '}' {
-                Ok(value)
-            } else {
-                Err(Error::ExpectedMapEnd)
-            }
-        } else {
-            Err(Error::ExpectedEnum)
-        }
+        // if self.peek_char()? == '"' {
+        //     // Visit a unit variant.
+        //     visitor.visit_enum(self.parse_string()?.into_deserializer())
+        // } else if self.next_char()? == '{' {
+        //     // Visit a newtype variant, tuple variant, or struct variant.
+        //     let value = visitor.visit_enum(Enum::new(self))?;
+        //     // Parse the matching close brace.
+        //     if self.next_char()? == '}' {
+        //         Ok(value)
+        //     } else {
+        //         Err(Error::ExpectedMapEnd)
+        //     }
+        // } else {
+        //     Err(Error::ExpectedEnum)
+        // }
+        todo!()
     }
 
     // An identifier in Serde is the type that identifies a field of a struct or
@@ -512,7 +466,7 @@ impl<'de, 'a> SeqAccess<'de> for CommaSeparated<'a, 'de> {
         }
         // Comma is required before every element except the first.
         if !self.first && self.de.next_char()? != ',' {
-            return Err(Error::ExpectedArrayComma);
+            return Err(Error::Message("foo".to_string()));
         }
         self.first = false;
         // Deserialize an array element.
@@ -535,7 +489,7 @@ impl<'de, 'a> MapAccess<'de> for CommaSeparated<'a, 'de> {
         }
         // Comma is required before every entry except the first.
         if !self.first && self.de.next_char()? != ',' {
-            return Err(Error::ExpectedMapComma);
+            return Err(Error::Message("foo".to_string()));
         }
         self.first = false;
         // Deserialize a map key.
@@ -550,7 +504,7 @@ impl<'de, 'a> MapAccess<'de> for CommaSeparated<'a, 'de> {
         // of `next_key_seed` or at the beginning of `next_value_seed`. In this
         // case the code is a bit simpler having it here.
         if self.de.next_char()? != ':' {
-            return Err(Error::ExpectedMapColon);
+            return Err(Error::Message("foo".to_string()));
         }
         // Deserialize a map value.
         seed.deserialize(&mut *self.de)
@@ -588,7 +542,7 @@ impl<'de, 'a> EnumAccess<'de> for Enum<'a, 'de> {
         if self.de.next_char()? == ':' {
             Ok((val, self))
         } else {
-            Err(Error::ExpectedMapColon)
+            Err(Error::Message("foo".to_string()))
         }
     }
 }
@@ -601,7 +555,7 @@ impl<'de, 'a> VariantAccess<'de> for Enum<'a, 'de> {
     // If the `Visitor` expected this variant to be a unit variant, the input
     // should have been the plain string case handled in `deserialize_enum`.
     fn unit_variant(self) -> Result<()> {
-        Err(Error::ExpectedString)
+        Err(Error::Message("foo".to_string()))
     }
 
     // Newtype variants are represented in JSON as `{ NAME: VALUE }` so

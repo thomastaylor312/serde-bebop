@@ -5,35 +5,53 @@ use crate::error::{Error, Result};
 pub struct Serializer {
     // This buffer starts empty and we append bytes to it
     output: Vec<u8>,
+    is_message: bool,
+    has_option: bool,
 }
 
 pub fn to_bytes<T>(value: &T) -> Result<Vec<u8>>
 where
     T: Serialize,
 {
-    let mut serializer = Serializer { output: Vec::new() };
+    let mut serializer = Serializer {
+        output: Vec::new(),
+        is_message: false,
+        has_option: false,
+    };
     value.serialize(&mut serializer)?;
     Ok(serializer.output)
 }
 
-// TODO: Probably add a `to_writer` and `to_async_writer`
+/// Forces serialization as a message. Normally, the serializer will
+/// automatically assume a Bebop message if there are optional fields and a
+/// Bebop struct if all the fields are required. This will force encoding as a
+/// message. Right now this will only force the top level struct to be a
+/// message, any embedded structs will not be assumed
+// TODO: Should we add a parameter to recurse all the way down? Specifically,
+// should we only encode the top level struct as a message unless recurse: true
+// is specified?
+pub fn to_bytes_message<T>(value: &T) -> Result<Vec<u8>>
+where
+    T: Serialize,
+{
+    let mut serializer = Serializer {
+        output: Vec::new(),
+        is_message: true,
+        has_option: false,
+    };
+    value.serialize(&mut serializer)?;
+    Ok(serializer.output)
+}
+
+// TODO: Maybe add a `to_writer` and `to_async_writer`
+
+// TODO: What would supporting the GUID and date types from bebop look like?
 
 impl<'a> ser::Serializer for &'a mut Serializer {
-    // The output type produced by this `Serializer` during successful
-    // serialization. Most serializers that produce text or binary output should
-    // set `Ok = ()` and serialize into an `io::Write` or buffer contained
-    // within the `Serializer` instance, as happens here. Serializers that build
-    // in-memory data structures may be simplified by using `Ok` to propagate
-    // the data structure around.
     type Ok = ();
 
-    // The error type when some error occurs during serialization.
     type Error = Error;
 
-    // Associated types for keeping track of additional state while serializing
-    // compound data structures like sequences and maps. In this case no
-    // additional state is required beyond what is already stored in the
-    // Serializer struct.
     type SerializeSeq = Self;
     type SerializeTuple = Self;
     type SerializeTupleStruct = Self;
@@ -42,21 +60,13 @@ impl<'a> ser::Serializer for &'a mut Serializer {
     type SerializeStruct = StructSerializer<'a>;
     type SerializeStructVariant = StructSerializer<'a>;
 
-    // Here we go with the simple methods. The following 12 methods receive one
-    // of the primitive types of the data model and map it to JSON by appending
-    // into the output string.
     fn serialize_bool(self, v: bool) -> Result<()> {
         self.output.push(if v { 0x01 } else { 0x00 });
         Ok(())
     }
 
-    // JSON does not distinguish between different sizes of integers, so all
-    // signed integers will be serialized the same and all unsigned integers
-    // will be serialized the same. Other formats, especially compact binary
-    // formats, may need independent logic for the different sizes.
-    fn serialize_i8(self, v: i8) -> Result<()> {
-        self.output.extend(&v.to_le_bytes());
-        Ok(())
+    fn serialize_i8(self, _v: i8) -> Result<()> {
+        Err(Error::Int8NotSupported)
     }
 
     fn serialize_i16(self, v: i16) -> Result<()> {
@@ -104,19 +114,15 @@ impl<'a> ser::Serializer for &'a mut Serializer {
         Ok(())
     }
 
-    // Serialize a char as a single-character string. Other formats may
-    // represent this differently.
+    // Serialize a char as a single-character string.
     fn serialize_char(self, v: char) -> Result<()> {
-        self.output.extend(&(1 as u32).to_le_bytes());
+        self.output.extend(&(v.len_utf8() as u32).to_le_bytes());
         let mut encoded = Vec::with_capacity(v.len_utf8());
         v.encode_utf8(&mut encoded);
         self.output.extend(encoded);
         Ok(())
     }
 
-    // This only works for strings that don't require escape sequences but you
-    // get the idea. For example it would emit invalid JSON if the input string
-    // contains a '"' character.
     fn serialize_str(self, v: &str) -> Result<()> {
         self.output
             .extend(&(v.as_bytes().len() as u32).to_le_bytes());
@@ -124,9 +130,6 @@ impl<'a> ser::Serializer for &'a mut Serializer {
         Ok(())
     }
 
-    // Serialize a byte array as an array of bytes. Could also use a base64
-    // string here. Binary formats will typically represent byte arrays more
-    // compactly.
     fn serialize_bytes(self, v: &[u8]) -> Result<()> {
         use serde::ser::SerializeSeq;
         let mut seq = self.serialize_seq(Some(v.len()))?;
@@ -136,53 +139,40 @@ impl<'a> ser::Serializer for &'a mut Serializer {
         seq.end()
     }
 
-    // An absent optional is represented as the JSON `null`.
     fn serialize_none(self) -> Result<()> {
-        // TODO: Might have to track an index here so we can write the proper index later
+        // Mark that we have an optional
+        self.has_option = true;
         Ok(())
     }
 
-    // A present optional is represented as just the contained value. Note that
-    // this is a lossy representation. For example the values `Some(())` and
-    // `None` both serialize as just `null`. Unfortunately this is typically
-    // what people expect when working with JSON. Other formats are encouraged
-    // to behave more intelligently if possible.
     fn serialize_some<T>(self, value: &T) -> Result<()>
     where
         T: ?Sized + Serialize,
     {
+        // Mark that we have an optional
+        self.has_option = true;
         value.serialize(self)
     }
 
-    // In Serde, unit means an anonymous value containing no data. Map this to
-    // JSON as `null`.
     fn serialize_unit(self) -> Result<()> {
-        // TODO: Might have to track an index here so we can write the proper index later
         Ok(())
     }
 
-    // Unit struct means a named value containing no data. Again, since there is
-    // no data, map this to JSON as `null`. There is no need to serialize the
-    // name in most formats.
     fn serialize_unit_struct(self, _name: &'static str) -> Result<()> {
         self.serialize_unit()
     }
 
-    // When serializing a unit variant (or any other kind of variant), formats
-    // can choose whether to keep track of it by index or by name. Binary
-    // formats typically use the index of the variant and human-readable formats
-    // typically use the name.
     fn serialize_unit_variant(
         self,
         _name: &'static str,
         variant_index: u32,
-        variant: &'static str,
+        _variant: &'static str,
     ) -> Result<()> {
-        // TODO: Serialize enum correctly
+        self.output.extend(&variant_index.to_le_bytes());
         Ok(())
     }
 
-    // As is done here, serializers are encouraged to treat newtype structs as
+    // Serializers are encouraged to treat newtype structs as
     // insignificant wrappers around the data they contain.
     fn serialize_newtype_struct<T>(self, _name: &'static str, value: &T) -> Result<()>
     where
@@ -196,13 +186,13 @@ impl<'a> ser::Serializer for &'a mut Serializer {
         _name: &'static str,
         _variant_index: u32,
         _variant: &'static str,
-        value: &T,
+        _value: &T,
     ) -> Result<()>
     where
         T: ?Sized + Serialize,
     {
-        // TODO: This cannot be supported as enums in bebop cannot contain additional data
-        value.serialize(self)
+        // This cannot be supported as enums in bebop cannot contain additional data
+        Err(Error::VariantDataNotAllowed)
     }
 
     fn serialize_seq(self, len: Option<usize>) -> Result<Self::SerializeSeq> {
@@ -229,18 +219,17 @@ impl<'a> ser::Serializer for &'a mut Serializer {
         self,
         _name: &'static str,
         _variant_index: u32,
-        variant: &'static str,
+        _variant: &'static str,
         _len: usize,
     ) -> Result<Self::SerializeTupleVariant> {
-        // TODO: I think all we need is to have the variant match a bebop struct, so just serialize that
-        variant.serialize(&mut *self)?;
-        Ok(self)
+        // This cannot be supported as enums in bebop cannot contain additional data
+        Err(Error::VariantDataNotAllowed)
     }
 
     fn serialize_map(self, len: Option<usize>) -> Result<Self::SerializeMap> {
         // Add the length of the map
         self.output
-            .extend(&(len.ok_or(Error::ExpectedArrayLength)? as u32).to_le_bytes());
+            .extend(&(len.ok_or(Error::ExpectedMapLength)? as u32).to_le_bytes());
         Ok(self)
     }
 
@@ -249,27 +238,20 @@ impl<'a> ser::Serializer for &'a mut Serializer {
         Ok(StructSerializer {
             parts: Vec::new(),
             expected_length: len,
-            has_none: false,
+            has_option: false,
             inner: self,
         })
     }
 
-    // Struct variants are represented in JSON as `{ NAME: { K: V, ... } }`.
-    // This is the externally tagged representation.
     fn serialize_struct_variant(
         self,
         _name: &'static str,
         _variant_index: u32,
-        variant: &'static str,
-        len: usize,
+        _variant: &'static str,
+        _len: usize,
     ) -> Result<Self::SerializeStructVariant> {
-        // TODO: We might not want to support this (I'll have to wait and see until I implement deserialize)
-        Ok(StructSerializer {
-            parts: Vec::new(),
-            expected_length: len,
-            has_none: false,
-            inner: self,
-        })
+        // This cannot be supported as enums in bebop cannot contain additional data
+        Err(Error::VariantDataNotAllowed)
     }
 }
 
@@ -278,7 +260,7 @@ pub struct StructSerializer<'a> {
     // `Option` values so we can represent as a message or a struct
     parts: Vec<Option<Vec<u8>>>,
     expected_length: usize,
-    has_none: bool,
+    has_option: bool,
     inner: &'a mut Serializer,
 }
 
@@ -319,16 +301,23 @@ impl<'a> StructSerializer<'a> {
 
     // These are the same functions needed for the trait implementation so they
     // can be reused
-    fn serialize_field_inner<T>(&mut self, key: &'static str, value: &T) -> Result<()>
+    fn serialize_field_inner<T>(&mut self, _key: &'static str, value: &T) -> Result<()>
     where
         T: ?Sized + Serialize,
     {
-        let mut serializer = Serializer { output: Vec::new() };
+        let mut serializer = Serializer {
+            output: Vec::new(),
+            is_message: false,
+            has_option: false,
+        };
         value.serialize(&mut serializer)?;
+
+        // Set that we have an optional if needed
+        self.has_option = serializer.has_option || self.has_option;
+
         // Not sure if there is a better way to check, but basically, if it is
         // none, it will still be empty
         if serializer.output.is_empty() {
-            self.has_none = true;
             self.parts.push(None)
         } else {
             self.parts.push(Some(serializer.output))
@@ -337,7 +326,15 @@ impl<'a> StructSerializer<'a> {
     }
 
     fn end_inner(self) -> Result<()> {
-        if self.has_none {
+        // Validate that we are serializing the right amount of things
+        if self.expected_length != self.parts.len() {
+            return Err(Error::StructLengthMismatch(
+                self.expected_length,
+                self.parts.len(),
+            ));
+        }
+        // If we are forcing message encoding or we have an option, encode as a message
+        if self.has_option || self.inner.is_message {
             self.serialize_message()
         } else {
             self.serialize_struct()
@@ -361,13 +358,6 @@ impl<'a> ser::SerializeStruct for StructSerializer<'a> {
     }
 }
 
-// The following 7 impls deal with the serialization of compound types like
-// sequences and maps. Serialization of such types is begun by a Serializer
-// method and followed by zero or more calls to serialize individual elements of
-// the compound type and one call to end the compound type.
-//
-// This impl is SerializeSeq so these methods are called after `serialize_seq`
-// is called on the Serializer.
 impl<'a> ser::SerializeSeq for &'a mut Serializer {
     // Must match the `Ok` type of the serializer.
     type Ok = ();
@@ -388,7 +378,6 @@ impl<'a> ser::SerializeSeq for &'a mut Serializer {
     }
 }
 
-// Same thing but for tuples.
 impl<'a> ser::SerializeTuple for &'a mut Serializer {
     type Ok = ();
     type Error = Error;
@@ -405,7 +394,6 @@ impl<'a> ser::SerializeTuple for &'a mut Serializer {
     }
 }
 
-// Same thing but for tuple structs.
 impl<'a> ser::SerializeTupleStruct for &'a mut Serializer {
     type Ok = ();
     type Error = Error;
@@ -461,8 +449,6 @@ impl<'a> ser::SerializeMap for &'a mut Serializer {
     }
 }
 
-// Similar to `SerializeTupleVariant`, here the `end` method is responsible for
-// closing both of the curly braces opened by `serialize_struct_variant`.
 impl<'a> ser::SerializeStructVariant for StructSerializer<'a> {
     type Ok = ();
     type Error = Error;
@@ -476,5 +462,161 @@ impl<'a> ser::SerializeStructVariant for StructSerializer<'a> {
 
     fn end(self) -> Result<()> {
         self.end_inner()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::collections::HashMap;
+
+    use super::*;
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    struct SimpleStruct {
+        name: String,
+        age: u16,
+    }
+
+    #[test]
+    fn test_valid_struct() {
+        let data = SimpleStruct {
+            name: "Charlie".to_string(),
+            age: 28,
+        };
+
+        let raw = to_bytes(&data).expect("Unable to serialize");
+        // Taken from one of the bebop reference implementations
+        let expected: Vec<u8> = vec![7, 0, 0, 0, 67, 104, 97, 114, 108, 105, 101, 28, 0];
+        assert_eq!(raw, expected);
+    }
+
+    #[test]
+    fn test_valid_struct_message() {
+        let data = SimpleStruct {
+            name: "Charlie".to_string(),
+            age: 28,
+        };
+
+        // Make sure if we force encoding as a message that it works
+        let raw = to_bytes_message(&data).expect("Unable to serialize");
+        // Taken from one of the bebop reference implementations
+        let expected: Vec<u8> = vec![
+            16, 0, 0, 0, 1, 7, 0, 0, 0, 67, 104, 97, 114, 108, 105, 101, 2, 28, 0, 0,
+        ];
+        assert_eq!(raw, expected);
+    }
+
+    #[derive(Serialize)]
+    struct SimpleMessage {
+        name: String,
+        age: Option<u16>,
+    }
+
+    #[test]
+    fn test_valid_message_all_fields() {
+        let data = SimpleMessage {
+            name: "Charlie".to_string(),
+            age: Some(28),
+        };
+
+        let raw = to_bytes(&data).expect("Unable to serialize");
+        // Taken from one of the bebop reference implementations
+        let expected: Vec<u8> = vec![
+            16, 0, 0, 0, 1, 7, 0, 0, 0, 67, 104, 97, 114, 108, 105, 101, 2, 28, 0, 0,
+        ];
+        assert_eq!(raw, expected);
+    }
+
+    #[test]
+    fn test_valid_message_some_fields() {
+        let data = SimpleMessage {
+            name: "Charlie".to_string(),
+            age: None,
+        };
+
+        let raw = to_bytes(&data).expect("Unable to serialize");
+        // Taken from one of the bebop reference implementations
+        let expected: Vec<u8> = vec![
+            13, 0, 0, 0, 1, 7, 0, 0, 0, 67, 104, 97, 114, 108, 105, 101, 0,
+        ];
+        assert_eq!(raw, expected);
+    }
+
+    #[derive(Serialize)]
+    #[allow(dead_code)]
+    enum Fun {
+        Not,
+        Somewhat,
+        Really,
+    }
+
+    #[derive(Serialize)]
+    struct Complex {
+        name: Option<String>,
+        fun_level: Fun,
+        map: HashMap<String, SimpleStruct>,
+        message_map: HashMap<String, SimpleMessage>,
+        list: Vec<f32>,
+        boolean: bool,
+        int16: i16,
+        int32: i32,
+        int64: i64,
+        uint16: u16,
+        uint32: u32,
+        uint64: u64,
+        byte: u8,
+        float64: f64,
+    }
+
+    #[test]
+    fn test_complex() {
+        // We are only inserting one entry into each map so the byte array will
+        // match (ordering doesn't matter for hash maps and so they could get
+        // encoded in different ways)
+        let mut map = HashMap::new();
+        map.insert(
+            "one".to_string(),
+            SimpleStruct {
+                name: "One".to_string(),
+                age: 16,
+            },
+        );
+        let mut message_map = HashMap::new();
+        message_map.insert(
+            "one".to_string(),
+            SimpleMessage {
+                name: "One".to_string(),
+                age: None,
+            },
+        );
+        let data = Complex {
+            name: Some("Charlie".to_string()),
+            fun_level: Fun::Somewhat,
+            map,
+            message_map,
+            list: vec![3.1415926, 2.71828],
+            boolean: true,
+            int16: -3,
+            int32: 42,
+            int64: 123456789,
+            uint16: 3,
+            uint32: 42,
+            uint64: 123456789,
+            byte: 17,
+            float64: 3.1415926,
+        };
+
+        let raw = to_bytes(&data).expect("Unable to serialize");
+        // Taken from one of the bebop reference implementations
+        let expected: Vec<u8> = vec![
+            124, 0, 0, 0, 1, 7, 0, 0, 0, 67, 104, 97, 114, 108, 105, 101, 2, 1, 0, 0, 0, 3, 1, 0,
+            0, 0, 3, 0, 0, 0, 111, 110, 101, 3, 0, 0, 0, 79, 110, 101, 16, 0, 4, 1, 0, 0, 0, 3, 0,
+            0, 0, 111, 110, 101, 9, 0, 0, 0, 1, 3, 0, 0, 0, 79, 110, 101, 0, 5, 2, 0, 0, 0, 218,
+            15, 73, 64, 77, 248, 45, 64, 6, 1, 7, 253, 255, 8, 42, 0, 0, 0, 9, 21, 205, 91, 7, 0,
+            0, 0, 0, 10, 3, 0, 11, 42, 0, 0, 0, 12, 21, 205, 91, 7, 0, 0, 0, 0, 13, 17, 14, 74,
+            216, 18, 77, 251, 33, 9, 64, 0,
+        ];
+        assert_eq!(raw, expected);
     }
 }
