@@ -471,9 +471,6 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
         self.deserialize_seq(visitor)
     }
 
-    // Much like `deserialize_seq` but calls the visitors `visit_map` method
-    // with a `MapAccess` implementation, rather than the visitor's `visit_seq`
-    // method with a `SeqAccess` implementation.
     fn deserialize_map<V>(mut self, visitor: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
@@ -513,22 +510,7 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        // if self.peek_char()? == '"' {
-        //     // Visit a unit variant.
-        //     visitor.visit_enum(self.parse_string()?.into_deserializer())
-        // } else if self.next_char()? == '{' {
-        //     // Visit a newtype variant, tuple variant, or struct variant.
-        //     let value = visitor.visit_enum(Enum::new(self))?;
-        //     // Parse the matching close brace.
-        //     if self.next_char()? == '}' {
-        //         Ok(value)
-        //     } else {
-        //         Err(Error::ExpectedMapEnd)
-        //     }
-        // } else {
-        //     Err(Error::ExpectedEnum)
-        // }
-        todo!()
+        visitor.visit_enum(self)
     }
 
     // An identifier in Serde is the type that identifies a field of a struct or
@@ -553,16 +535,19 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
 struct List<'a, 'de: 'a> {
     de: &'a mut Deserializer<'de>,
     expected_len: usize,
+    current_len: usize,
 }
 
 impl<'a, 'de> List<'a, 'de> {
     fn new(de: &'a mut Deserializer<'de>, expected_len: usize) -> Self {
-        List { de, expected_len }
+        List {
+            de,
+            expected_len,
+            current_len: 0,
+        }
     }
 }
 
-// `SeqAccess` is provided to the `Visitor` to give it the ability to iterate
-// through elements of the sequence.
 impl<'de, 'a> SeqAccess<'de> for List<'a, 'de> {
     type Error = Error;
 
@@ -570,23 +555,17 @@ impl<'de, 'a> SeqAccess<'de> for List<'a, 'de> {
     where
         T: DeserializeSeed<'de>,
     {
-        // Check if there are no more elements.
-        // if self.de.peek_char()? == ']' {
-        //     return Ok(None);
-        // }
-        // // Comma is required before every element except the first.
-        // if !self.first && self.de.next_char()? != ',' {
-        //     return Err(Error::Message("foo".to_string()));
-        // }
-        // self.first = false;
-        // // Deserialize an array element.
-        // seed.deserialize(&mut *self.de).map(Some)
-        todo!()
+        // If we have serialized all entries, we are done
+        if self.current_len == self.expected_len {
+            Ok(None)
+        } else {
+            // Otherwise, increment the current and deserialize the next message
+            self.current_len += 1;
+            seed.deserialize(&mut *self.de).map(Some)
+        }
     }
 }
 
-// `MapAccess` is provided to the `Visitor` to give it the ability to iterate
-// through entries of the map.
 impl<'de, 'a> MapAccess<'de> for List<'a, 'de> {
     type Error = Error;
 
@@ -594,52 +573,26 @@ impl<'de, 'a> MapAccess<'de> for List<'a, 'de> {
     where
         K: DeserializeSeed<'de>,
     {
-        // Check if there are no more entries.
-        // if self.de.peek_char()? == '}' {
-        //     return Ok(None);
-        // }
-        // // Comma is required before every entry except the first.
-        // if !self.first && self.de.next_char()? != ',' {
-        //     return Err(Error::Message("foo".to_string()));
-        // }
-        // self.first = false;
-        // // Deserialize a map key.
-        // seed.deserialize(&mut *self.de).map(Some)
-        todo!()
+        // If we have serialized all entries, we are done
+        if self.current_len == self.expected_len {
+            Ok(None)
+        } else {
+            // Otherwise, increment the current and deserialize the next message
+            self.current_len += 1;
+            seed.deserialize(&mut *self.de).map(Some)
+        }
     }
 
     fn next_value_seed<V>(&mut self, seed: V) -> Result<V::Value>
     where
         V: DeserializeSeed<'de>,
     {
-        // It doesn't make a difference whether the colon is parsed at the end
-        // of `next_key_seed` or at the beginning of `next_value_seed`. In this
-        // case the code is a bit simpler having it here.
-        // if self.de.next_char()? != ':' {
-        //     return Err(Error::Message("foo".to_string()));
-        // }
-        // // Deserialize a map value.
-        // seed.deserialize(&mut *self.de)
-        todo!()
+        // We handle the index incrementing in the key seed, so just serialize
+        seed.deserialize(&mut *self.de)
     }
 }
 
-struct Enum<'a, 'de: 'a> {
-    de: &'a mut Deserializer<'de>,
-}
-
-impl<'a, 'de> Enum<'a, 'de> {
-    fn new(de: &'a mut Deserializer<'de>) -> Self {
-        Enum { de }
-    }
-}
-
-// `EnumAccess` is provided to the `Visitor` to give it the ability to determine
-// which variant of the enum is supposed to be deserialized.
-//
-// Note that all enum deserialization methods in Serde refer exclusively to the
-// "externally tagged" enum representation.
-impl<'de, 'a> EnumAccess<'de> for Enum<'a, 'de> {
+impl<'a, 'de> EnumAccess<'de> for &'a mut Deserializer<'de> {
     type Error = Error;
     type Variant = Self;
 
@@ -647,54 +600,43 @@ impl<'de, 'a> EnumAccess<'de> for Enum<'a, 'de> {
     where
         V: DeserializeSeed<'de>,
     {
-        // The `deserialize_enum` method parsed a `{` character so we are
-        // currently inside of a map. The seed will be deserializing itself from
-        // the key of the map.
-        let val = seed.deserialize(&mut *self.de)?;
+        // All we need is a u32, so get that data and deserialize
+        let index = self.parse_object_size()?;
+        let val = seed.deserialize(index.into_deserializer())?;
         // Parse the colon separating map key from value.
-        if self.de.next_char()? == ':' {
-            Ok((val, self))
-        } else {
-            Err(Error::Message("foo".to_string()))
-        }
+        Ok(val, self)
     }
 }
 
-// `VariantAccess` is provided to the `Visitor` to give it the ability to see
-// the content of the single variant that it decided to deserialize.
-impl<'de, 'a> VariantAccess<'de> for Enum<'a, 'de> {
+impl<'a, 'de> VariantAccess<'de> for &'a mut Deserializer<'de> {
     type Error = Error;
 
     // If the `Visitor` expected this variant to be a unit variant, the input
     // should have been the plain string case handled in `deserialize_enum`.
     fn unit_variant(self) -> Result<()> {
-        Err(Error::Message("foo".to_string()))
+        // We already serialized the index, so just return ok
+        Ok(())
     }
 
-    // Newtype variants are represented in JSON as `{ NAME: VALUE }` so
-    // deserialize the value here.
+    // The rest of these all return errors as they are not supported in bebop
     fn newtype_variant_seed<T>(self, seed: T) -> Result<T::Value>
     where
         T: DeserializeSeed<'de>,
     {
-        seed.deserialize(self.de)
+        Err(Error::VariantDataNotAllowed)
     }
 
-    // Tuple variants are represented in JSON as `{ NAME: [DATA...] }` so
-    // deserialize the sequence of data here.
     fn tuple_variant<V>(self, _len: usize, visitor: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
-        de::Deserializer::deserialize_seq(self.de, visitor)
+        Err(Error::VariantDataNotAllowed)
     }
 
-    // Struct variants are represented in JSON as `{ NAME: { K: V, ... } }` so
-    // deserialize the inner map here.
     fn struct_variant<V>(self, _fields: &'static [&'static str], visitor: V) -> Result<V::Value>
     where
         V: Visitor<'de>,
     {
-        de::Deserializer::deserialize_map(self.de, visitor)
+        Err(Error::VariantDataNotAllowed)
     }
 }
