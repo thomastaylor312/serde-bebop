@@ -424,7 +424,7 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
     fn deserialize_struct<V>(
         mut self,
         _name: &'static str,
-        _fields: &'static [&'static str],
+        fields: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value>
     where
@@ -442,21 +442,19 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
         let bytes = &self.input[..size];
         let len =
             u32::from_le_bytes(bytes.try_into().map_err(|_| Error::InvalidNumberBytes)?) as usize;
-        // TODO: Figure out how to pull out a nested message: Probably assume it is the length and check that the last byte at the end of that range is a 0 byte
-        let next_index = if self.input[size..].len() == len {
+        // If this is the correct length, we should find a 0 byte at the end of the length
+        let is_message = if self.input[size..][len - 1] == 0u8 {
             println!("got message with name {}", _name);
             // Consume the bytes we used for the message length and trim off the trailing 0 byte
             self.input = &self.input[size..];
-            let (_, rest) = self.input.split_last().ok_or(Error::Eof)?;
-            self.input = rest;
             self.is_message = true;
             // If it is a message, make sure to set the message index (starting with 1)
-            Some(BEBOP_STARTING_INDEX)
+            true
         } else {
             println!("got struct with name {}", _name);
-            None
+            false
         };
-        visitor.visit_seq(StructAccess::new(&mut self, next_index))
+        visitor.visit_seq(StructAccess::new(&mut self, fields.len(), is_message))
     }
 
     fn deserialize_enum<V>(
@@ -554,12 +552,19 @@ impl<'de, 'a> MapAccess<'de> for List<'a, 'de> {
 
 struct StructAccess<'a, 'de: 'a> {
     de: &'a mut Deserializer<'de>,
-    next_index: Option<usize>,
+    expected_fields: usize,
+    is_message: bool,
+    next_index: usize,
 }
 
 impl<'a, 'de> StructAccess<'a, 'de> {
-    fn new(de: &'a mut Deserializer<'de>, next_index: Option<usize>) -> Self {
-        StructAccess { de, next_index }
+    fn new(de: &'a mut Deserializer<'de>, expected_fields: usize, is_message: bool) -> Self {
+        StructAccess {
+            de,
+            expected_fields,
+            is_message,
+            next_index: BEBOP_STARTING_INDEX,
+        }
     }
 }
 
@@ -570,19 +575,27 @@ impl<'de, 'a> SeqAccess<'de> for StructAccess<'a, 'de> {
     where
         T: DeserializeSeed<'de>,
     {
-        // If we get to the end of the data we are done
-        if self.de.input.is_empty() {
+        // If we get to the end of the expected fields in a struct we are done
+        if self.next_index > self.expected_fields && !self.is_message {
+            println!("Got here for struct");
+            Ok(None)
+        } else if self.next_index > self.expected_fields && self.is_message {
+            println!("Got here for message");
+            // Trim the trailing byte if we got here
+            self.de.input = &self.de.input[1..];
             Ok(None)
         } else {
-            // Otherwise, increment the current index (if a message) and trim the index off the input if it is a message
-            if let Some(i) = self.next_index.take() {
-                println!("Expected index: {}", i);
+            // Otherwise, increment the current index and trim the index off the input if it is a message
+            let expected_index = self.next_index;
+            // Either way, the index increments, so we know that this one wasn't present in the
+            // message (or was handled)
+            self.next_index = expected_index + 1;
+            if self.is_message {
+                println!("Expected index: {}", expected_index);
                 println!("Current input: {:?}", self.de.input);
                 let possible_index = *self.de.input.first().ok_or(Error::Eof)? as usize;
-                // Either way, the index increments, so we know that this one
-                // wasn't present in the message (or was handled)
-                self.next_index = Some(i + 1);
-                if i == possible_index {
+
+                if expected_index == possible_index {
                     // Consume the index so the next part parses properly
                     self.de.input = &self.de.input[1..];
                     // Let the deserializer know that this index wasn't skipped
@@ -592,6 +605,7 @@ impl<'de, 'a> SeqAccess<'de> for StructAccess<'a, 'de> {
                     self.de.skipped_index = true;
                 }
             }
+            // TODO: Still missing the trailing byte
             seed.deserialize(&mut *self.de).map(Some)
         }
     }
