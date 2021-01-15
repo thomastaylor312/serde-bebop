@@ -1,10 +1,22 @@
 [package]
-name = "serde-bebop"
+name = "serde_bebop"
 version = "0.1.0"
-authors = ["taylo"]
+authors = ["Taylor Thomas <taylor.thomas@microsoft.com>"]
 edition = "2018"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+license-file = "LICENSE"
+description = "A Serde implementation for the Bebop protocol"
+repository = "https://github.com/thomastaylor312/bebop"
+readme = "README.md"
+keywords = [
+    "serialization",
+    "deserialization",
+    "bebop",
+    "serde"
+]
+exclude = [
+    ".github/*",
+    ".gitignore"
+]
 
 [dependencies]
 serde = "1.0"

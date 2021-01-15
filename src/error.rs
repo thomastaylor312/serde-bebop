@@ -3,15 +3,12 @@ use std::fmt::Display;
 use serde::{de, ser};
 use thiserror::Error as ThisError;
 
+/// A custom shorthand result type that always has an error type of [`Error`](Error)
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// The possible errors that the Bebop serializer and deserializer can return
 #[derive(Clone, Debug, PartialEq, ThisError)]
 pub enum Error {
-    // One or more variants that can be created by data structures through the
-    // `ser::Error` and `de::Error` traits. For example the Serialize impl for
-    // Mutex<T> might return an error because the mutex is poisoned, or the
-    // Deserialize impl for a struct may return an error because a required
-    // field is missing.
     #[error("{0}")]
     Message(String),
 

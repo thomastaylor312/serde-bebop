@@ -10,6 +10,7 @@ use crate::error::{Error, Result};
 
 const BEBOP_STARTING_INDEX: usize = 1;
 
+/// A Deserializer implementation for Bebop
 pub struct Deserializer<'de> {
     // This string starts with the input data and characters are truncated off
     // the beginning as data is parsed.
@@ -19,6 +20,7 @@ pub struct Deserializer<'de> {
 }
 
 impl<'de> Deserializer<'de> {
+    /// Creates a new Deserializer that will deserialize the given byte slice
     pub fn from_bytes(input: &'de [u8]) -> Self {
         Deserializer {
             input,
@@ -29,6 +31,8 @@ impl<'de> Deserializer<'de> {
 }
 
 /// Deserializes from raw bytes to the given type
+///
+/// If you need a deserializer, use `Deserializer::from_bytes` to create one
 pub fn from_bytes<'a, T>(s: &'a [u8]) -> Result<T>
 where
     T: Deserialize<'a>,

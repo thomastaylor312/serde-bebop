@@ -2,6 +2,7 @@ use serde::{ser, Serialize};
 
 use crate::error::{Error, Result};
 
+/// A Serializer implementation for Bebop
 pub struct Serializer {
     // This buffer starts empty and we append bytes to it
     output: Vec<u8>,
@@ -9,6 +10,7 @@ pub struct Serializer {
     has_option: bool,
 }
 
+/// Serializes the given object into a Bebop encoded vec of bytes
 pub fn to_bytes<T>(value: &T) -> Result<Vec<u8>>
 where
     T: Serialize,
