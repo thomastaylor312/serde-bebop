@@ -43,8 +43,6 @@ where
     Ok(serializer.output)
 }
 
-// TODO: Maybe add a `to_writer` and `to_async_writer`
-
 // TODO: What would supporting the GUID and date types from bebop look like?
 
 impl<'a> ser::Serializer for &'a mut Serializer {
@@ -590,6 +588,7 @@ mod test {
                 age: None,
             },
         );
+        #[allow(clippy::approx_constant, clippy::clippy::excessive_precision)]
         let data = Complex {
             name: Some("Charlie".to_string()),
             fun_level: Fun::Somewhat,

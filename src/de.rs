@@ -337,8 +337,6 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
         if self.is_message && self.skipped_index {
             // We are handling a message, so check for the index
             visitor.visit_none()
-        } else if self.is_message && !self.skipped_index {
-            visitor.visit_some(self)
         } else {
             // We are handling a struct, so the data is present. Just return a visit_some
             visitor.visit_some(self)
@@ -444,14 +442,12 @@ impl<'de, 'a> de::Deserializer<'de> for &'a mut Deserializer<'de> {
             u32::from_le_bytes(bytes.try_into().map_err(|_| Error::InvalidNumberBytes)?) as usize;
         // If this is the correct length, we should find a 0 byte at the end of the length
         let is_message = if self.input[size..][len - 1] == 0u8 {
-            println!("got message with name {}", _name);
             // Consume the bytes we used for the message length and trim off the trailing 0 byte
             self.input = &self.input[size..];
             self.is_message = true;
             // If it is a message, make sure to set the message index (starting with 1)
             true
         } else {
-            println!("got struct with name {}", _name);
             false
         };
         visitor.visit_seq(StructAccess::new(&mut self, fields.len(), is_message))
@@ -576,11 +572,10 @@ impl<'de, 'a> SeqAccess<'de> for StructAccess<'a, 'de> {
         T: DeserializeSeed<'de>,
     {
         // If we get to the end of the expected fields in a struct we are done
+        // TODO: These first blocks don't seem to matter and never appear to get called
         if self.next_index > self.expected_fields && !self.is_message {
-            println!("Got here for struct");
             Ok(None)
         } else if self.next_index > self.expected_fields && self.is_message {
-            println!("Got here for message");
             // Trim the trailing byte if we got here
             self.de.input = &self.de.input[1..];
             Ok(None)
@@ -591,8 +586,6 @@ impl<'de, 'a> SeqAccess<'de> for StructAccess<'a, 'de> {
             // message (or was handled)
             self.next_index = expected_index + 1;
             if self.is_message {
-                println!("Expected index: {}", expected_index);
-                println!("Current input: {:?}", self.de.input);
                 let possible_index = *self.de.input.first().ok_or(Error::Eof)? as usize;
 
                 if expected_index == possible_index {
@@ -605,8 +598,13 @@ impl<'de, 'a> SeqAccess<'de> for StructAccess<'a, 'de> {
                     self.de.skipped_index = true;
                 }
             }
-            // TODO: Still missing the trailing byte
-            seed.deserialize(&mut *self.de).map(Some)
+
+            let res = seed.deserialize(&mut *self.de).map(Some)?;
+            if self.is_message && self.next_index > self.expected_fields {
+                // Trim the terminator byte if this is the last part of the message
+                self.de.input = &self.de.input[1..];
+            }
+            Ok(res)
         }
     }
 }
@@ -779,6 +777,7 @@ mod test {
                 age: None,
             },
         );
+        #[allow(clippy::approx_constant, clippy::clippy::excessive_precision)]
         let expected = Complex {
             name: Some("Charlie".to_string()),
             fun_level: Fun::Somewhat,
